@@ -1,0 +1,48 @@
+[project]
+name = "flux-meter-service"
+version = "0.1.0"
+description = "Serves a Thorlabs Zelux flux camera to MAST units over HTTP"
+authors = [
+    { name = "Eli Brody", email = "eli.brody@weizmann.ac.il" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "astropy>=8.0.1",
+    "fastapi>=0.143.0",
+    "numpy>=2.5.4",
+    "uvicorn>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "ruff==0.16.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 125
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "N", "B", "UP", "C90", "SIM", "TID"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
