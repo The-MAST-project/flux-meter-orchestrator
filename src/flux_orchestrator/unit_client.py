@@ -57,11 +57,13 @@ class Target:
 
 @dataclass(frozen=True)
 class SpiralStep:
-    cell: tuple[int, int]
-    ring: int
+    #: None, with `error`, when PWI4 reported no spiral offset for this step.
+    cell: tuple[int, int] | None
+    ring: int | None
     #: Relative to the share's MAST root, or None with `image_error` saying why.
     image: str | None
     image_error: str | None
+    error: str | None
 
 
 class UnitClient:
@@ -122,8 +124,9 @@ class UnitClient:
         usable_fraction: float,
         center: tuple[int, int] | None,
     ) -> dict[str, Any]:
-        """Open a spiral session that saves every step's frame. Its `shared_folder` holds them."""
-        value = self._request(
+        """Open a spiral session that saves every step's frame. Its `shared_folder` holds them, or is
+        None with `share_error` when they will not reach the share; the session is open either way."""
+        return self._request(
             "PUT",
             "spiral_new_path",
             {
@@ -137,18 +140,16 @@ class UnitClient:
             },
             timeout=exposure_seconds + STEP_OVERHEAD_S,
         )
-        if value.get("shared_folder") is None:
-            raise UnitApiError(f"{self.name}: the spiral's frames will not reach the share: {value.get('share_error')}")
-        return value
 
     def spiral_next_step(self, exposure_seconds: float) -> SpiralStep:
         value = self._request("PUT", "spiral_next_step", {}, timeout=exposure_seconds + STEP_OVERHEAD_S)
-        if "cell" not in value:
-            # Without a cell there is no ring, and the stopping rule has nothing to read.
-            raise UnitApiError(f"{self.name}: spiral step reported no cell: {value.get('error')}")
-        x, y = value["cell"]
+        cell = (int(value["cell"][0]), int(value["cell"][1])) if "cell" in value else None
         return SpiralStep(
-            cell=(int(x), int(y)), ring=int(value["ring"]), image=value["image"], image_error=value.get("image_error")
+            cell=cell,
+            ring=int(value["ring"]) if cell is not None else None,
+            image=value["image"],
+            image_error=value.get("image_error"),
+            error=value.get("error"),
         )
 
     def spiral_end_path(self, exposure_seconds: float) -> dict[str, Any]:

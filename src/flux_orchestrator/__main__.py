@@ -1,8 +1,8 @@
 """`python -m flux_orchestrator --unit mastNN --flux-meter http://HOST:PORT [target] [options]`.
 
-Run on mast-ns-spec, beside the flux-meter service. Ctrl+C aborts the run: an open spiral session
-is closed (which stops tracking), otherwise the unit is aborted. Either way `result.json` is
-written.
+Run on mast-ns-spec, beside the flux-meter service. Ctrl+C aborts the run: during the acquisition the unit
+is aborted; once the spiral session is requested it is closed, which stops tracking. Either way
+`result.json` is written. Exit status 0 only for a converged run with a result.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{record.terminal}: dx={result.dx} dy={result.dy} px (confidence {result.confidence}) at cell "
             f"{result.argmax_cell}; see {record.folder}"
         )
-    return 0 if record.terminal == Terminal.CONVERGED else 1
+    return 0 if record.terminal == Terminal.CONVERGED and result is not None else 1
 
 
 if __name__ == "__main__":

@@ -77,7 +77,11 @@ Finds the pointing at which most starlight reaches the science fiber, and measur
 2. The folding mirror goes to SPEC (`stage/move_to_preset`), waited on by `stage.at_preset`.
 3. The unit opens a spiral session that saves every step's frame (`spiral_new_path`, `save_intermediate_exposures=true`); it takes `reference.fits` and starts tracking.
 4. At each cell, `--frames` flux frames from this service, each reduced by aperture photometry, then to their median. `spiral_next_step` moves to the next cell of PWI4's spiral and saves its imager frame. A complete ring with no improvement stops the walk (`--patience-rings`), as do `--max-rings` and `--max-radius`.
-5. `spiral_end_path` closes the session, which stops tracking. The shift between `reference.fits` and the brightest cell's frame, both read from the share, is the answer.
+5. `spiral_end_path` closes the session, which stops tracking. The shift between `reference.fits` and the brightest cell's frame, both read from the share, is the answer, correlated around the fiber position the unit resolved for the session (read from the session's own `result.json`). When the brightest cell is the origin, whose frame is the reference itself, the shift is zero and nothing is correlated (`argmax_at_reference`).
+
+A step for which PWI4 reports no cell is measured and recorded but completes no ring. A failure of the unit's own final frame in `spiral_end_path` is recorded and does not cost the run its result.
+
+**Known gap.** The unit's in-built flux metering resets PWI4's spiral offset at the end of a run, returning the mount to the acquired pointing. The operator spiral does not, and the unit API has no call that does, so after a run the mount is left at the cell where the walk stopped (tracking off).
 
 **What the unit must have.** `status.acquisition` (MAST_unit#346) and the spiral session's share paths and per-step timeout (MAST_unit#349). Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
 
@@ -91,7 +95,7 @@ Defaults follow the unit's own flux metering: 5 s exposures (imager and flux ali
 
 **Products.** `<output-root>/<observing night>/flux-orchestrator/NNNN/`: every flux frame as `flux-<step>-<n>.fits`, and `result.json` with the parameters, each step (cell, ring, flux, the imager frame's path on the share) and the result (`dx`, `dy`, confidence, the arg-max cell, the commanded offset in pixels to compare against). `--output-root` defaults to `\\mast-ns-control\mast-share\MAST\mast-ns-spec`, and `--share-root`, where the unit's frames are read, to `\\mast-ns-control\mast-share\MAST`. `result.json` is written on every exit.
 
-**Ctrl+C** closes an open spiral session (stopping tracking), or aborts the unit before one is open. The exit status is 0 only for a converged run.
+**Ctrl+C** aborts the unit while it acquires or moves the mirror, closes the spiral session (stopping tracking) once one has been requested, and leaves the unit alone once the session is closed. The exit status is 0 only for a converged run with a result.
 
 The photometry and the correlation are copies of MAST_unit's (`aperture_photometry_single.py`, `frame_shift.py`), kept as they are there until the unit's flux metering is removed.
 

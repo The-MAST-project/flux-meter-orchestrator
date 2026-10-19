@@ -46,21 +46,26 @@ class RingRule:
 
     patience_rings: int
     max_rings: int
+    #: The arg-max: the step the stopping rule judges by is the one the run correlates.
+    best_index: int | None = None
     best_flux: float | None = None
     best_ring: int = 0
     current_ring: int = 0
     rings_without_improvement: int = 0
 
-    def update(self, flux: float | None, ring: int) -> Terminal | None:
+    def update(self, index: int, flux: float | None, ring: int | None) -> Terminal | None:
         """Take one measured step. Returns why to stop, or None to step again.
 
         A step whose flux is None is skipped, never compared: defaulting it to zero would make
-        a dark cell the worst cell rather than an unknown one.
+        a dark cell the worst cell rather than an unknown one. A step whose ring is unknown
+        (PWI4 reported no cell) can still be the best, but completes no ring.
         """
         if flux is not None and (self.best_flux is None or flux > self.best_flux):
-            self.best_flux, self.best_ring = flux, ring
+            self.best_index, self.best_flux = index, flux
+            if ring is not None:
+                self.best_ring = ring
 
-        if ring > self.current_ring:
+        if ring is not None and ring > self.current_ring:
             completed_with_improvement = self.best_ring >= self.current_ring
             self.rings_without_improvement = 0 if completed_with_improvement else self.rings_without_improvement + 1
             self.current_ring = ring

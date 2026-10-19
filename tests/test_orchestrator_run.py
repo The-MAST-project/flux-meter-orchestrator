@@ -26,6 +26,7 @@ SHIFT_TOLERANCE_PX = 0.6
 def sky(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Sky:
     monkeypatch.setattr(unit_client, "POLL_INTERVAL_S", 0.0)
     monkeypatch.setattr(run_module, "FRAME_POLL_INTERVAL_S", 0.0)
+    monkeypatch.setattr(run_module, "FRAME_ARRIVAL_TIMEOUT_S", 2.0)
     return Sky(share_root=tmp_path / "share")
 
 
@@ -132,3 +133,95 @@ def test_a_half_copied_frame_is_not_read_as_a_frame(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="did not arrive"):
         run_module.read_frame(path)
+
+
+def test_the_camera_is_recorded_as_an_object(sky, tmp_path):
+    record = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0).run()
+    assert recorded(record)["camera"]["saturation_level"] == 1023
+
+
+def test_a_failed_final_frame_still_gives_the_runs_result(sky, tmp_path):
+    """The unit's final frame is for the record only; the session closes either way."""
+    sky.end_fails = True
+    record = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0).run()
+
+    assert record.result is not None and record.result.argmax_cell == sky.peak_cell
+    assert record.unit_end_path_error is not None and "final exposure failed" in record.unit_end_path_error
+
+
+def test_the_record_is_written_when_closing_the_session_fails_too(sky, tmp_path, monkeypatch):
+    run = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0)
+
+    def dead(seconds):
+        raise UnitApiError("the unit went away")
+
+    monkeypatch.setattr(run.unit, "spiral_next_step", dead)
+    monkeypatch.setattr(run.unit, "spiral_end_path", dead)
+    with pytest.raises(UnitApiError, match="went away"):
+        run.run()
+
+    document = json.loads((run.folder / RESULT_FILE).read_text())
+    assert document["terminal"] == "failed"
+    assert document["unit_end_path_error"] == "the unit went away"
+    assert len(document["steps"]) == 1
+
+
+def test_a_session_whose_frames_miss_the_share_is_closed(sky, tmp_path):
+    """The unit opens the session, and starts tracking, before it reports the share problem."""
+    sky.share_unmapped = True
+    with pytest.raises(UnitApiError, match="will not reach the share"):
+        make_run(sky, tmp_path).run()
+    assert sky.calls[-1] == "spiral_end_path"
+
+
+def test_an_interruption_before_the_spiral_aborts_the_unit(sky, tmp_path, monkeypatch):
+    run = make_run(sky, tmp_path)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run.unit, "put_mirror_in", interrupted)
+    record = run.run()
+
+    assert record.terminal == Terminal.ABORTED
+    assert sky.calls[-1] == "abort"
+    assert "spiral_new_path" not in sky.calls
+
+
+def test_an_interruption_after_the_session_closed_leaves_the_unit_alone(sky, tmp_path, monkeypatch):
+    run = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0)
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run, "_center", interrupted)
+    record = run.run()
+
+    assert record.terminal == Terminal.ABORTED
+    assert "abort" not in sky.calls
+    assert sky.calls.count("spiral_end_path") == 1
+
+
+def test_a_step_without_a_cell_does_not_end_the_walk(sky, tmp_path):
+    sky.cellless_step = 4
+    record = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0).run()
+
+    assert record.terminal == Terminal.CONVERGED
+    assert record.steps[4].cell is None and record.steps[4].cell_error is not None
+    assert record.result is not None and record.result.argmax_cell == sky.peak_cell
+
+
+def test_an_arg_max_at_the_origin_is_not_correlated_against_itself(sky, tmp_path):
+    sky.peak_cell = (0, 0)
+    record = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0).run()
+
+    result = record.result
+    assert result is not None and result.argmax_at_reference
+    assert (result.dx, result.dy) == (0.0, 0.0)
+    assert result.confidence is None, "nothing was correlated, so there is no confidence to report"
+
+
+def test_the_walk_stops_at_the_radius_cap(sky, tmp_path):
+    sky.peak_cell = (2, 2)  # brightening outward, so the ring rule keeps going and the cap stops it
+    record = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0, max_radius_arcsec=4.0).run()
+    assert record.terminal == Terminal.MAX_RADIUS

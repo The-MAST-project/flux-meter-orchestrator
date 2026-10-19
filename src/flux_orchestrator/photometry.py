@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass
+from enum import StrEnum
 
 import numpy as np
 from photutils.utils.exceptions import NoDetectionsWarning
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 MIN_PLAUSIBLE_FWHM_PX = 3.0
 
 
+class PositionSource(StrEnum):
+    """Where the aperture was placed: on a source found in this frame, where the last one was
+    found, or nowhere."""
+
+    DETECTED = "detected"
+    INHERITED = "inherited"
+    NONE = "none"
+
+
 @dataclass
 class FluxMeasurement:
     """One frame, reduced. `net_counts` is None when there was nothing to measure.
@@ -34,7 +44,7 @@ class FluxMeasurement:
     """
 
     net_counts: float | None
-    position_source: str
+    position_source: PositionSource
     counts_err: float | None = None
     snr: float | None = None
     x: float | None = None
@@ -101,7 +111,7 @@ def measure_frame(frame: np.ndarray, last_position: tuple[float, float] | None =
     data = np.asarray(frame, dtype=float)
     in_frame = int(np.count_nonzero(data >= SATURATION_ADU))
 
-    def reduced(result: dict, source: str) -> FluxMeasurement:
+    def reduced(result: dict, source: PositionSource) -> FluxMeasurement:
         return FluxMeasurement(
             net_counts=float(result["net_counts"]),
             position_source=source,
@@ -124,7 +134,7 @@ def measure_frame(frame: np.ndarray, last_position: tuple[float, float] | None =
             found = measure_single_image(data, verbose=False)
         rejection = _why_not_the_fiber(data, found, SPIKE_PEAK_FRACTION)
         if rejection is None:
-            return reduced(found, "detected")
+            return reduced(found, PositionSource.DETECTED)
         logger.warning(rejection)
     except Exception as detection_failed:  # noqa: BLE001 -- a dark cell is not a run failure
         rejection = str(detection_failed)
@@ -132,7 +142,7 @@ def measure_frame(frame: np.ndarray, last_position: tuple[float, float] | None =
     def unmeasured() -> FluxMeasurement:
         return FluxMeasurement(
             net_counts=None,
-            position_source="none",
+            position_source=PositionSource.NONE,
             saturated_in_frame=in_frame,
             saturation_threshold=SATURATION_ADU,
             error=rejection,
@@ -144,7 +154,7 @@ def measure_frame(frame: np.ndarray, last_position: tuple[float, float] | None =
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", NoDetectionsWarning)
-            inherited = reduced(measure_single_image(data, position=last_position, verbose=False), "inherited")
+            inherited = reduced(measure_single_image(data, position=last_position, verbose=False), PositionSource.INHERITED)
         inherited.error = rejection
         return inherited
     except Exception as ex:  # noqa: BLE001 -- reported in the measurement, not raised

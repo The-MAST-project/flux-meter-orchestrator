@@ -13,7 +13,7 @@ from flux_orchestrator.spiral import RingRule, Terminal, radius_arcsec, represen
 def walk(rule: RingRule, steps: Sequence[tuple[float | None, int]]) -> tuple[Terminal | None, int]:
     """Feed (flux, ring) pairs until the rule stops; returns why and after how many."""
     for n, (flux, ring) in enumerate(steps, start=1):
-        terminal = rule.update(flux, ring)
+        terminal = rule.update(n - 1, flux, ring)
         if terminal is not None:
             return terminal, n
     return None, len(steps)
@@ -44,10 +44,17 @@ class TestRingRule:
 
     def test_an_unmeasurable_step_is_never_the_best(self):
         rule = RingRule(patience_rings=1, max_rings=6)
-        rule.update(None, 0)
-        assert rule.best_flux is None
-        rule.update(-3.0, 1)
-        assert rule.best_flux == -3.0, "a negative net count is a measurement; None is not"
+        rule.update(0, None, 0)
+        assert rule.best_index is None
+        rule.update(1, -3.0, 1)
+        assert (rule.best_index, rule.best_flux) == (1, -3.0), "a negative net count is a measurement; None is not"
+
+    def test_a_step_with_no_cell_can_be_the_best_but_completes_no_ring(self):
+        rule = RingRule(patience_rings=1, max_rings=6)
+        rule.update(0, 10.0, 0)
+        assert rule.update(1, 99.0, None) is None
+        assert rule.best_index == 1
+        assert rule.current_ring == 0, "an unknown cell says nothing about which ring is complete"
 
 
 class TestRepresentative:

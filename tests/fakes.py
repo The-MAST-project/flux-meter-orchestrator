@@ -76,6 +76,12 @@ class Sky:
     acquisition_outcome: str = "ended"
     #: A step index whose frame fails, reported through `image_error`.
     failing_step: int | None = None
+    #: A step index for which PWI4 reports no spiral offset.
+    cellless_step: int | None = None
+    #: `spiral_end_path`'s final exposure fails; the session still closes, as the unit's does.
+    end_fails: bool = False
+    #: The unit's frames will not reach the share (Z: unmapped).
+    share_unmapped: bool = False
     calls: list[str] = field(default_factory=list)
     acquisition: dict[str, Any] | None = None
     at_preset: str | None = "sky"
@@ -102,41 +108,67 @@ class Sky:
 
     def unit_handler(self, request: httpx.Request) -> httpx.Response:
         method = request.url.path.removeprefix("/mast/api/v1/unit/")
-        params = dict(request.url.params)
         self.calls.append(method)
-        match method:
-            case "status":
-                return envelope(self._status())
-            case "start_acquisition_and_guiding":
-                assert params["handover_automatically_to_guider"] == "false"
-                self.acquisition = {"state": "running", "errors": [], "started_at": "t"}
-                return envelope()
-            case "stage/move_to_preset":
-                self.at_preset = None
-                return envelope()
-            case "spiral_new_path":
-                assert params["save_intermediate_exposures"] == "true"
-                self.x_step_arcsec, self.y_step_arcsec = float(params["x_step_arcsec"]), float(params["y_step_arcsec"])
-                self.session_open, self.tracking, self.cell = True, True, (0, 0)
-                self._cells = spiral_cells()
-                self.write_frame(REFERENCE)
-                return envelope({"folder": "D:/MAST/...", "shared_folder": SESSION_FOLDER, "reference_image": REFERENCE})
-            case "spiral_next_step":
-                assert self.session_open and self._cells is not None
-                self.steps += 1
-                self.cell = next(self._cells)
-                value = {"step#": self.steps, "cell": list(self.cell), "ring": max(map(abs, self.cell)), "image": None}
-                if self.steps == self.failing_step:
-                    value["image_error"] = "exposure of 'step-0001.fits' failed"
-                else:
-                    value["image"] = self.write_frame(f"step-{self.steps:04d}.fits")
-                return envelope(value)
-            case "spiral_end_path":
-                self.session_open, self.tracking = False, False
-                return envelope({"center_x": IMAGER_SIZE // 2, "center_y": IMAGER_SIZE // 2, "center_source": "fake"})
-            case "abort":
-                return envelope()
-        return httpx.Response(404)
+        endpoints = {
+            "status": lambda _params: envelope(self._status()),
+            "start_acquisition_and_guiding": self._acquire,
+            "stage/move_to_preset": self._move_stage,
+            "spiral_new_path": self._spiral_new_path,
+            "spiral_next_step": self._spiral_next_step,
+            "spiral_end_path": self._spiral_end_path,
+            "abort": lambda _params: envelope(),
+        }
+        if method not in endpoints:
+            return httpx.Response(404)
+        return endpoints[method](dict(request.url.params))
+
+    def _acquire(self, params: dict[str, str]) -> httpx.Response:
+        assert params["handover_automatically_to_guider"] == "false"
+        self.acquisition = {"state": "running", "errors": [], "started_at": "t"}
+        return envelope()
+
+    def _move_stage(self, _params: dict[str, str]) -> httpx.Response:
+        self.at_preset = None
+        return envelope()
+
+    def _spiral_new_path(self, params: dict[str, str]) -> httpx.Response:
+        assert params["save_intermediate_exposures"] == "true"
+        self.x_step_arcsec, self.y_step_arcsec = float(params["x_step_arcsec"]), float(params["y_step_arcsec"])
+        self.session_open, self.tracking, self.cell = True, True, (0, 0)
+        self._cells = spiral_cells()
+        if self.share_unmapped:
+            return envelope({"folder": "C:/MAST/...", "shared_folder": None, "share_error": "not on the share"})
+        self.write_frame(REFERENCE)
+        return envelope({"folder": "D:/MAST/...", "shared_folder": SESSION_FOLDER, "reference_image": REFERENCE})
+
+    def _spiral_next_step(self, _params: dict[str, str]) -> httpx.Response:
+        assert self.session_open and self._cells is not None
+        self.steps += 1
+        self.cell = next(self._cells)
+        value: dict[str, Any] = {"step#": self.steps, "image": None}
+        if self.steps == self.cellless_step:
+            value["error"] = "PWI4 reported no spiral offset"
+        else:
+            value |= {"cell": list(self.cell), "ring": max(map(abs, self.cell))}
+        if self.steps == self.failing_step:
+            value["image_error"] = "exposure of 'step-0001.fits' failed"
+        else:
+            value["image"] = self.write_frame(f"step-{self.steps:04d}.fits")
+        return envelope(value)
+
+    def _spiral_end_path(self, _params: dict[str, str]) -> httpx.Response:
+        if not self.session_open:
+            return envelope(errors=["spiral_end_path: no spiral session is open"])
+        self.session_open, self.tracking = False, False
+        # Written on every ending, as the unit's `_result` is, and only where the frames went.
+        result = {"center_x": IMAGER_SIZE // 2, "center_y": IMAGER_SIZE // 2, "center_source": "fake"}
+        if not self.share_unmapped:
+            path = self.share_root.joinpath(*SESSION_FOLDER.split("/"), "result.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(result))
+        if self.end_fails:
+            return envelope(errors=["spiral_end_path: final exposure failed"])
+        return envelope(result)
 
     def _status(self) -> dict[str, Any]:
         status = {"acquisition": self.acquisition, "stage": {"at_preset": self.at_preset}}
