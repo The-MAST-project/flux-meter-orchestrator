@@ -1,7 +1,7 @@
 [project]
 name = "flux-meter-service"
 version = "0.1.0"
-description = "Serves a Thorlabs Zelux flux camera to MAST units over HTTP"
+description = "Serves a Thorlabs Zelux flux camera over HTTP, and the flux-metering orchestrator that uses it"
 authors = [
     { name = "Eli Brody", email = "eli.brody@weizmann.ac.il" }
 ]
@@ -9,7 +9,12 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "astropy>=8.0.1",
     "fastapi>=0.143.0",
+    "httpx>=0.28.1",
     "numpy>=2.5.4",
+    "photutils>=3.1.1",
+    "scikit-image>=0.26.0",
+    "scipy>=1.18.1",
+    "tifffile>=2026.10.15",
     "uvicorn>=0.54.0",
 ]
 
@@ -17,9 +22,11 @@ dependencies = [
 requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+module-name = ["flux_meter_service", "flux_orchestrator"]
+
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=9.1.1",
     "ruff==0.16.0",
 ]
@@ -35,6 +42,10 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["F", "E", "W", "I", "N", "B", "UP", "C90", "SIM", "TID"]
 
+[tool.ruff.lint.per-file-ignores]
+# A copy of MAST_unit's module, kept as it is there so the two stay comparable until the unit's goes.
+"src/flux_orchestrator/aperture_photometry_single.py" = ["C901"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -43,6 +54,8 @@ docstring-code-format = true
 
 [tool.pyright]
 include = ["src", "tests"]
+# The two copies of MAST_unit modules, kept as they are there (see the ruff ignore above).
+ignore = ["src/flux_orchestrator/aperture_photometry_single.py", "src/flux_orchestrator/frame_shift.py"]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"

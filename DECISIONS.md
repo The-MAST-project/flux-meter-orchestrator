@@ -1,5 +1,18 @@
 # Decisions
 
+## [2026-10-19] The orchestrator drives the unit's operator spiral and reads its frames from the share
+
+**Why.** Flux metering inside the unit reaches the mount, imager and stage directly, so it never tested what the unit's HTTP API can do, and the flux camera is not on the unit. The orchestrator was planned on 2026-10-13 around `expose` per step, with flux frames matched to each imager frame's window across the two hosts' clocks. That plan hit two walls: `expose` stops tracking after every run (MAST_unit#302, still open), and an `expose` inside an open spiral session overwrites the session's exposure series, after which the session cannot be closed until the unit service restarts (the overwrite in MAST_unit#232).
+
+**What.**
+- The spiral stays on the unit, through the operator spiral endpoints (`spiral_new_path` / `spiral_next_step` / `spiral_end_path`) rather than `acquire_and_find_max_flux`. The session saves one imager frame per step; the orchestrator never calls `expose`.
+- Flux frames are taken after each step returns, at the settled cell, `N` per step reduced by the median, so no frame pairing across the hosts' clocks is needed. One imager frame per step, not `N`.
+- The camera stays behind this service; the orchestrator is a client of two HTTP APIs and opens no hardware. Supersedes the 2026-10-13 entry's note on the API gaps (`MAST_unit#326`, `#327`): the acquisition outcome now comes from MAST_unit#346, and the spiral session's gaps were fixed in MAST_unit#349 (share paths relative to the share's MAST root, a failed step frame reported, the abandonment timer re-armed per step).
+- The reduction (aperture photometry, the median, the ring rule, the correlation) is copied into `flux_orchestrator`; the photometry and frame-shift modules nearly verbatim, so they stay comparable with the unit's until those are removed. The two copies are exempt from ruff's C901 and from pyright, whose complaints there come from third-party typing.
+- New dependencies: httpx (moved from dev), photutils, scipy, scikit-image, tifffile.
+
+**Implications.** The reduction exists twice until MAST_unit's flux metering is removed. A run needs a unit with #346 and #349. The correlation uses one frame at the arg-max cell, against the in-unit procedure's choice among `N`.
+
 ## [2026-10-13] Hosted on a personal GitHub repo; the flux-metering orchestrator lives here for now
 
 **Why.** Flux metering is moving out of the unit service into an orchestrator that drives a unit over its HTTP API and this service over its own. That orchestrator needs a home before its durable one is decided, and the work should not add a repository to The-MAST-project while it is still exploratory.

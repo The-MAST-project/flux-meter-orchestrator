@@ -4,6 +4,8 @@ A small HTTP service that serves the Thorlabs Zelux (CS165MU) flux camera to the
 
 The service opens the camera when it starts and holds it until it stops. There is no open, close, claim or token on the wire: one flux-metering run at a time is an operating rule, and the service only serializes individual camera calls with a lock.
 
+The repository also holds `flux_orchestrator`, which runs flux metering from mast-ns-spec instead of from inside a unit: it drives one unit through the unit's public HTTP API and takes its flux frames from this service. See [Flux-metering orchestrator](#flux-metering-orchestrator).
+
 ## Contract
 
 | Call | Request | Reply |
@@ -67,6 +69,32 @@ curl --noproxy * http://mast-ns-spec:<PORT>/info
 
 For a daylight network test without the camera, add `--fake` and drop `--dll-dir`.
 
+## Flux-metering orchestrator
+
+Finds the pointing at which most starlight reaches the science fiber, and measures how far that is, in imager pixels, from where acquisition put the star. One run, against one unit:
+
+1. The unit acquires the target with no guider handover (`start_acquisition_and_guiding`, `handover_automatically_to_guider=false`); the run waits for `status.acquisition` to leave `running` and goes on only on `ended`.
+2. The folding mirror goes to SPEC (`stage/move_to_preset`), waited on by `stage.at_preset`.
+3. The unit opens a spiral session that saves every step's frame (`spiral_new_path`, `save_intermediate_exposures=true`); it takes `reference.fits` and starts tracking.
+4. At each cell, `--frames` flux frames from this service, each reduced by aperture photometry, then to their median. `spiral_next_step` moves to the next cell of PWI4's spiral and saves its imager frame. A complete ring with no improvement stops the walk (`--patience-rings`), as do `--max-rings` and `--max-radius`.
+5. `spiral_end_path` closes the session, which stops tracking. The shift between `reference.fits` and the brightest cell's frame, both read from the share, is the answer.
+
+**What the unit must have.** `status.acquisition` (MAST_unit#346) and the spiral session's share paths and per-step timeout (MAST_unit#349). Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
+
+```
+python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55
+python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --object Vega
+python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --skip-acquisition   # shakedown, no measurement
+```
+
+Defaults follow the unit's own flux metering: 5 s exposures (imager and flux alike), 0.5" steps, 3 flux frames per step, 6 rings, 10" radius. `--center X Y` sets the fiber's imager position for the correlation; by default the unit resolves it from `guiding.rois[fcu_v2]`, then the frame center.
+
+**Products.** `<output-root>/<observing night>/flux-orchestrator/NNNN/`: every flux frame as `flux-<step>-<n>.fits`, and `result.json` with the parameters, each step (cell, ring, flux, the imager frame's path on the share) and the result (`dx`, `dy`, confidence, the arg-max cell, the commanded offset in pixels to compare against). `--output-root` defaults to `\\mast-ns-control\mast-share\MAST\mast-ns-spec`, and `--share-root`, where the unit's frames are read, to `\\mast-ns-control\mast-share\MAST`. `result.json` is written on every exit.
+
+**Ctrl+C** closes an open spiral session (stopping tracking), or aborts the unit before one is open. The exit status is 0 only for a converged run.
+
+The photometry and the correlation are copies of MAST_unit's (`aperture_photometry_single.py`, `frame_shift.py`), kept as they are there until the unit's flux metering is removed.
+
 ## Development
 
 Built and tested on macOS; the Thorlabs SDK is not needed for the tests.
@@ -89,7 +117,21 @@ src/flux_meter_service/
   save.py       /expose_and_save's FITS writer, folder layout and numbering
   thorcam.py    the Zelux through the Thorlabs SDK (copied from MAST_unit)
   fake.py       noise frames for --fake
+src/flux_orchestrator/
+  __main__.py                    CLI
+  run.py                         one run: acquire, mirror, spiral walk, correlation, products
+  unit_client.py                 the unit's public HTTP API
+  flux_client.py                 this service's contract
+  spiral.py                      the ring stopping rule, the median choice, the sky radius
+  photometry.py                  one flux frame to net counts, with the hot-pixel guards
+  correlate.py                   reference vs arg-max frame
+  aperture_photometry_single.py  copied from MAST_unit
+  frame_shift.py                 copied from MAST_unit
 tests/
+  fakes.py                       a unit and the service faked at the HTTP layer, sharing one sky
+  test_orchestrator_run.py       whole runs against the fakes
+  test_orchestrator_rules.py     the stopping rule and the median
+  test_orchestrator_photometry.py  detection, darkness and spikes
   test_service.py   endpoints in process against a stub camera
   test_save.py      /expose_and_save: layout, numbering, header, failures
   test_cli.py       CLI parsing, exit when the camera will not open
@@ -98,4 +140,4 @@ tests/
 
 ## Dependencies
 
-FastAPI, uvicorn, numpy and astropy (for the FITS writer), pinned in `uv.lock`. Tests use pytest and httpx. The Thorlabs SDK is installed separately (above). Nothing from MAST_common, MAST_unit or MAST_spec.
+FastAPI, uvicorn, numpy and astropy (for the FITS writer), pinned in `uv.lock`. The orchestrator adds httpx, photutils, scipy, scikit-image and tifffile (the last for the copied photometry module's own CLI). Tests use pytest. The Thorlabs SDK is installed separately (above). Nothing from MAST_common, MAST_unit or MAST_spec.
