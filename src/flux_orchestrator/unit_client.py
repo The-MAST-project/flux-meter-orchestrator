@@ -36,7 +36,7 @@ class UnitApiError(RuntimeError):
 
 
 class AcquisitionState(StrEnum):
-    """`FullUnitStatus.acquisition.state`, MAST_common `models/statuses.py`."""
+    """`FullUnitStatus.latest.acquisition.state`, MAST_common `models/latest.py`."""
 
     RUNNING = "running"
     GUIDING = "guiding"
@@ -81,8 +81,8 @@ class UnitClient:
     def acquire(self, target: Target, seconds: float, gain: int | None) -> None:
         """Acquire onto the assumed fiber position and wait for the outcome; no guiding.
 
-        The unit replaces `status.acquisition` with a fresh `RUNNING` outcome before it answers,
-        so the first status read after this PUT already describes this acquisition.
+        The unit replaces `status.latest.acquisition` with a fresh `RUNNING` record before it
+        answers, so the first status read after this PUT already describes this acquisition.
         """
         self._request(
             "PUT",
@@ -98,13 +98,15 @@ class UnitClient:
                 "handover_automatically_to_guider": False,
             },
         )
-        outcome = self._wait_for(
-            "the acquisition to finish",
-            ACQUISITION_TIMEOUT_S,
-            lambda status: (status.get("acquisition") or {}).get("state") != AcquisitionState.RUNNING,
-        )["acquisition"]
+        outcome = self._latest_acquisition(
+            self._wait_for(
+                "the acquisition to finish",
+                ACQUISITION_TIMEOUT_S,
+                lambda status: (self._latest_acquisition(status) or {}).get("state") != AcquisitionState.RUNNING,
+            )
+        )
         if outcome is None:
-            raise UnitApiError(f"{self.name}: status reports no acquisition outcome; the unit predates it")
+            raise UnitApiError(f"{self.name}: status reports no latest acquisition; the unit predates it")
         if outcome["state"] != AcquisitionState.ENDED:
             raise UnitApiError(f"{self.name}: acquisition {outcome['state']}: {outcome.get('errors')}")
 
@@ -155,6 +157,10 @@ class UnitClient:
     def spiral_end_path(self, exposure_seconds: float) -> dict[str, Any]:
         """Close the session: the unit takes its final frame, correlates it, and stops tracking."""
         return self._request("PUT", "spiral_end_path", {}, timeout=exposure_seconds + STEP_OVERHEAD_S)
+
+    @staticmethod
+    def _latest_acquisition(status: dict[str, Any]) -> dict[str, Any] | None:
+        return (status.get("latest") or {}).get("acquisition")
 
     @staticmethod
     def _stage_preset(status: dict[str, Any]) -> str | None:

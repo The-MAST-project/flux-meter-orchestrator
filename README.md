@@ -73,7 +73,7 @@ For a daylight network test without the camera, add `--fake` and drop `--dll-dir
 
 Finds the pointing at which most starlight reaches the science fiber, and measures how far that is, in imager pixels, from where acquisition put the star. One run, against one unit:
 
-1. The unit acquires the target with no guider handover (`start_acquisition_and_guiding`, `handover_automatically_to_guider=false`); the run waits for `status.acquisition` to leave `running` and goes on only on `ended`.
+1. The unit acquires the target with no guider handover (`start_acquisition_and_guiding`, `handover_automatically_to_guider=false`); the run waits for `status.latest.acquisition` to leave `running` and goes on only on `ended`.
 2. The folding mirror goes to SPEC (`stage/move_to_preset`), waited on by `stage.at_preset`.
 3. The unit opens a spiral session that saves every step's frame (`spiral_new_path`, `save_intermediate_exposures=true`); it takes `reference.fits` and starts tracking.
 4. At each cell, `--frames` flux frames from this service, each reduced by aperture photometry, then to their median. `spiral_next_step` moves to the next cell of PWI4's spiral and saves its imager frame. A complete ring with no improvement stops the walk (`--patience-rings`), as do `--max-rings` and `--max-radius`.
@@ -83,7 +83,7 @@ A step for which PWI4 reports no cell is measured and recorded but completes no 
 
 **Known gap.** The unit's in-built flux metering resets PWI4's spiral offset at the end of a run, returning the mount to the acquired pointing. The operator spiral does not, and the unit API has no call that does, so after a run the mount is left at the cell where the walk stopped (tracking off).
 
-**What the unit must have.** `status.acquisition` (MAST_unit#346) and the spiral session's share paths and per-step timeout (MAST_unit#349). Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
+**What the unit must have.** `status.latest.acquisition` (MAST_unit#346, moved under `latest` by MAST_unit#371) and the spiral session's share paths and per-step timeout (MAST_unit#349). Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
 
 ```
 python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55

@@ -86,6 +86,17 @@ def test_a_failed_acquisition_opens_no_session_and_is_recorded(sky, tmp_path):
     assert json.loads(folders[0].read_text())["terminal"] == "failed"
 
 
+def test_a_unit_without_the_latest_records_fails_the_acquisition_at_once(sky, tmp_path, monkeypatch):
+    """A unit from before MAST_unit#371 reports `status.acquisition`, not `status.latest`."""
+    monkeypatch.setattr(sky, "_status", lambda: {"acquisition": {"state": "ended"}, "stage": {"at_preset": "sky"}})
+
+    with pytest.raises(UnitApiError, match="no latest acquisition"):
+        make_run(sky, tmp_path).run()
+
+    assert sky.calls.count("status") == 1, "failed on the first read, not after the acquisition timeout"
+    assert "spiral_new_path" not in sky.calls
+
+
 def test_an_interrupted_walk_closes_the_session(sky, tmp_path, monkeypatch):
     run = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0)
     real_step = run.unit.spiral_next_step

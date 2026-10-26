@@ -124,7 +124,7 @@ class Sky:
 
     def _acquire(self, params: dict[str, str]) -> httpx.Response:
         assert params["handover_automatically_to_guider"] == "false"
-        self.acquisition = {"state": "running", "errors": [], "started_at": "t"}
+        self.acquisition = {"state": "running", "errors": [], "started": "t", "ended": None, "succeeded": None}
         return envelope()
 
     def _move_stage(self, _params: dict[str, str]) -> httpx.Response:
@@ -171,7 +171,7 @@ class Sky:
         return envelope(result)
 
     def _status(self) -> dict[str, Any]:
-        status = {"acquisition": self.acquisition, "stage": {"at_preset": self.at_preset}}
+        status = {"latest": {"acquisition": self.acquisition}, "stage": {"at_preset": self.at_preset}}
         # Each read moves the slow things one poll along.
         if self.acquisition is not None and self.acquisition["state"] == "running":
             self.acquisition = {**self.acquisition, "state": self.acquisition_outcome}
