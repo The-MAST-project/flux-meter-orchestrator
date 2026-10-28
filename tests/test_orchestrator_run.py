@@ -86,6 +86,17 @@ def test_a_failed_acquisition_opens_no_session_and_is_recorded(sky, tmp_path):
     assert json.loads(folders[0].read_text())["terminal"] == "failed"
 
 
+def test_a_unit_with_ra_coordinate_spiral_steps_is_refused_and_its_session_closed(sky, tmp_path):
+    """Before MAST_unit#136's fix the unit's RA step is cos(dec) short on the sky, and says nothing."""
+    sky.predates_on_sky_steps = True
+
+    with pytest.raises(UnitApiError, match="on-sky spiral steps"):
+        make_run(sky, tmp_path).run()
+
+    assert "spiral_next_step" not in sky.calls
+    assert sky.calls[-1] == "spiral_end_path", "the session it opened is closed"
+
+
 def test_a_unit_without_the_latest_records_fails_the_acquisition_at_once(sky, tmp_path, monkeypatch):
     """A unit from before MAST_unit#371 reports `status.acquisition`, not `status.latest`."""
     monkeypatch.setattr(sky, "_status", lambda: {"acquisition": {"state": "ended"}, "stage": {"at_preset": "sky"}})

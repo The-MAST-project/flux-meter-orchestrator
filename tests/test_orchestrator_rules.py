@@ -72,8 +72,7 @@ def test_ring_is_read_from_the_cell():
     assert [ring_of(c) for c in [(0, 0), (1, -1), (-2, 1), (0, 3)]] == [0, 1, 2, 3]
 
 
-def test_the_radius_carries_cos_dec_on_the_ra_axis():
-    assert radius_arcsec((2, 0), 1.0, 1.0, 60.0) == pytest.approx(1.0)
-    assert radius_arcsec((0, 2), 1.0, 1.0, 60.0) == pytest.approx(2.0)
-    assert radius_arcsec((1, 1), 3.0, 4.0, 0.0) == pytest.approx(5.0)
-    assert math.isclose(radius_arcsec((0, 0), 1.0, 1.0, 45.0), 0.0)
+def test_the_radius_is_the_offset_on_the_sky():
+    assert radius_arcsec((2, 0), 1.0, 1.0) == pytest.approx(2.0)
+    assert radius_arcsec((1, 1), 3.0, 4.0) == pytest.approx(5.0)
+    assert math.isclose(radius_arcsec((0, 0), 1.0, 1.0), 0.0)

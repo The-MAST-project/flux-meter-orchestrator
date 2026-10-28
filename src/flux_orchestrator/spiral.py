@@ -28,10 +28,9 @@ def ring_of(cell: tuple[int, int]) -> int:
     return max(abs(cell[0]), abs(cell[1]))
 
 
-def radius_arcsec(cell: tuple[int, int], x_step_arcsec: float, y_step_arcsec: float, dec_degrees: float) -> float:
-    """Sky angle from the origin. The x step is RA COORDINATE arcsec, so the sky moves that times
-    cos(dec) along it (MAST_unit#136); without it the radius reads 25% high at dec +41."""
-    return math.hypot(cell[0] * x_step_arcsec * math.cos(math.radians(dec_degrees)), cell[1] * y_step_arcsec)
+def radius_arcsec(cell: tuple[int, int], x_step_arcsec: float, y_step_arcsec: float) -> float:
+    """Sky angle from the origin. The unit takes both steps as angles on the sky (MAST_unit#136)."""
+    return math.hypot(cell[0] * x_step_arcsec, cell[1] * y_step_arcsec)
 
 
 @dataclass

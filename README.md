@@ -83,7 +83,7 @@ A step for which PWI4 reports no cell is measured and recorded but completes no 
 
 **Known gap.** The unit's in-built flux metering resets PWI4's spiral offset at the end of a run, returning the mount to the acquired pointing. The operator spiral does not, and the unit API has no call that does, so after a run the mount is left at the cell where the walk stopped (tracking off).
 
-**What the unit must have.** `status.latest.acquisition` (MAST_unit#346, moved under `latest` by MAST_unit#371) and the spiral session's share paths and per-step timeout (MAST_unit#349). Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
+**What the unit must have.** `status.latest.acquisition` (MAST_unit#346, moved under `latest` by MAST_unit#371), the spiral session's share paths and per-step timeout (MAST_unit#349), and spiral steps taken as angles on the sky (MAST_unit#136), which `spiral_new_path` confirms by reporting the RA step it commanded. Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
 
 ```
 python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55

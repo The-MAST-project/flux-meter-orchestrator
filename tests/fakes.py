@@ -82,6 +82,8 @@ class Sky:
     end_fails: bool = False
     #: The unit's frames will not reach the share (Z: unmapped).
     share_unmapped: bool = False
+    #: A unit from before MAST_unit#136's fix: its RA step is RA coordinate, and it does not say so.
+    predates_on_sky_steps: bool = False
     calls: list[str] = field(default_factory=list)
     acquisition: dict[str, Any] | None = None
     at_preset: str | None = "sky"
@@ -91,8 +93,7 @@ class Sky:
     _cells: Iterator[tuple[int, int]] | None = None
 
     def commanded_px(self, cell: tuple[int, int]) -> tuple[float, float]:
-        ra_scale = math.cos(math.radians(DEC_DEGREES))
-        return cell[0] * self.x_step_arcsec * ra_scale / PIXEL_SCALE, cell[1] * self.y_step_arcsec / PIXEL_SCALE
+        return cell[0] * self.x_step_arcsec / PIXEL_SCALE, cell[1] * self.y_step_arcsec / PIXEL_SCALE
 
     def write_frame(self, name: str) -> str:
         relative = f"{SESSION_FOLDER}/{name}"
@@ -136,10 +137,15 @@ class Sky:
         self.x_step_arcsec, self.y_step_arcsec = float(params["x_step_arcsec"]), float(params["y_step_arcsec"])
         self.session_open, self.tracking, self.cell = True, True, (0, 0)
         self._cells = spiral_cells()
+        value: dict[str, Any] = {}
+        if not self.predates_on_sky_steps:
+            ra_step = self.x_step_arcsec / math.cos(math.radians(DEC_DEGREES))
+            value |= {"dec_for_ra_step_degs": DEC_DEGREES, "ra_step_commanded_arcsec": ra_step}
         if self.share_unmapped:
-            return envelope({"folder": "C:/MAST/...", "shared_folder": None, "share_error": "not on the share"})
+            return envelope(value | {"folder": "C:/MAST/...", "shared_folder": None, "share_error": "not on the share"})
         self.write_frame(REFERENCE)
-        return envelope({"folder": "D:/MAST/...", "shared_folder": SESSION_FOLDER, "reference_image": REFERENCE})
+        value |= {"folder": "D:/MAST/...", "shared_folder": SESSION_FOLDER, "reference_image": REFERENCE}
+        return envelope(value)
 
     def _spiral_next_step(self, _params: dict[str, str]) -> httpx.Response:
         assert self.session_open and self._cells is not None

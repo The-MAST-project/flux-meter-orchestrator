@@ -15,7 +15,6 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import math
 import re
 import time
 from collections.abc import Callable
@@ -38,6 +37,8 @@ from flux_orchestrator.unit_client import SpiralStep, Target, UnitApiError, Unit
 
 logger = logging.getLogger(__name__)
 
+#: What `spiral_new_path` reports once the unit takes its steps as angles on the sky (MAST_unit#136).
+RA_STEP_COMMANDED = "ra_step_commanded_arcsec"
 #: Where the unit's products appear on mast-ns-spec: the share's MAST root, which the unit's
 #: reported paths are relative to.
 DEFAULT_SHARE_ROOT = Path(r"\\mast-ns-control\mast-share\MAST")
@@ -294,6 +295,11 @@ class Run:
         self._stage = Stage.SPIRAL
         session = self.unit.spiral_new_path(p.x_step_arcsec, p.y_step_arcsec, p.seconds, p.usable_fraction, p.center)
         self.record.session = session
+        if session.get(RA_STEP_COMMANDED) is None:
+            raise UnitApiError(
+                f"{p.unit}: the unit predates on-sky spiral steps (MAST_unit#136); its RA step would be "
+                "cos(dec) short on the sky"
+            )
         if session.get("shared_folder") is None:
             raise UnitApiError(f"{p.unit}: the spiral's frames will not reach the share: {session.get('share_error')}")
         self._shared_folder = session["shared_folder"]
@@ -319,9 +325,7 @@ class Run:
             self.record.best_index = self._rule.best_index
             if terminal is not None:
                 return terminal
-            if step.cell is not None and (
-                radius_arcsec(step.cell, p.x_step_arcsec, p.y_step_arcsec, self._dec_degrees or 0.0) > p.max_radius_arcsec
-            ):
+            if step.cell is not None and (radius_arcsec(step.cell, p.x_step_arcsec, p.y_step_arcsec) > p.max_radius_arcsec):
                 return Terminal.MAX_RADIUS
 
             moved = self.unit.spiral_next_step(p.seconds)
@@ -449,8 +453,7 @@ class Run:
     def _commanded_offset_px(self, offset_arcsec: tuple[float, float] | None) -> tuple[float, float] | None:
         if offset_arcsec is None or not self._pixel_scale or self._pixel_scale <= 0:
             return None
-        ra_scale = math.cos(math.radians(self._dec_degrees)) if self._dec_degrees is not None else 1.0
-        return (offset_arcsec[0] * ra_scale / self._pixel_scale, offset_arcsec[1] / self._pixel_scale)
+        return (offset_arcsec[0] / self._pixel_scale, offset_arcsec[1] / self._pixel_scale)
 
     def _write_flux_frame(
         self, name: str, frame: FluxFrame, index: int, cell: tuple[int, int] | None, ring: int | None
