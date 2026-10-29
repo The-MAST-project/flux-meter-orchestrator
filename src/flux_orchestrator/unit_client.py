@@ -60,7 +60,7 @@ class SpiralStep:
     #: None, with `error`, when PWI4 reported no spiral offset for this step.
     cell: tuple[int, int] | None
     ring: int | None
-    #: Relative to the share's MAST root, or None with `image_error` saying why.
+    #: On the share, or None with `image_error` saying why.
     image: str | None
     image_error: str | None
     error: str | None
@@ -126,8 +126,8 @@ class UnitClient:
         usable_fraction: float,
         center: tuple[int, int] | None,
     ) -> dict[str, Any]:
-        """Open a spiral session that saves every step's frame. Its `shared_folder` holds them, or is
-        None with `share_error` when they will not reach the share; the session is open either way."""
+        """Open a spiral session that saves every step's frame. Where they land is in
+        `latest_spiral`; the session is open either way."""
         return self._request(
             "PUT",
             "spiral_new_path",
@@ -153,6 +153,15 @@ class UnitClient:
             image_error=value.get("image_error"),
             error=value.get("error"),
         )
+
+    def latest_spiral(self) -> dict[str, Any]:
+        """`status.latest.spiral`. The unit replaces it before `spiral_new_path` answers, so the
+        first read after it describes that session; `shared_products_path` is None while the
+        unit's share is demoted."""
+        spiral = (self.status().get("latest") or {}).get("spiral")
+        if spiral is None:
+            raise UnitApiError(f"{self.name}: status reports no latest spiral session; the unit predates it")
+        return spiral
 
     def spiral_end_path(self, exposure_seconds: float) -> dict[str, Any]:
         """Close the session: the unit takes its final frame, correlates it, and stops tracking."""

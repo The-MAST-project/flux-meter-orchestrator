@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from flux_orchestrator.flux_client import FluxMeterClient
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, DEFAULT_SHARE_ROOT, Run, RunParams
+from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, Run, RunParams
 from flux_orchestrator.spiral import Terminal
 from flux_orchestrator.unit_client import UNIT_PORT, Target, UnitClient
 
@@ -53,7 +53,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--center", type=int, nargs=2, metavar=("X", "Y"), help="fiber position on the imager")
 
     paths = parser.add_argument_group("paths")
-    paths.add_argument("--share-root", type=Path, default=DEFAULT_SHARE_ROOT, help=f"default {DEFAULT_SHARE_ROOT}")
     paths.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help=f"default {DEFAULT_OUTPUT_ROOT}")
 
     args = parser.parse_args(argv)
@@ -86,7 +85,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         params,
         UnitClient(args.unit, port=args.unit_port),
         FluxMeterClient(args.flux_meter),
-        share_root=args.share_root,
         output_root=args.output_root,
     )
     record = run.run()

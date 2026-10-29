@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-10-29] The spiral session's share folder comes from `status.latest.spiral`
+
+**Why.** MAST_unit#349 first reported the session folder and step frames relative to the share's MAST root, because the share was spelled differently on each host. Since MAST_common#200 every Windows host reaches the share by the same UNC path, `//mast-ns-control/mast-share/MAST/`, mast-ns-spec included, and the unit's run records (`status.latest.*`, MAST_common `LatestBase`) already carry each run's folder on the share. #349 was reworked onto a `latest.spiral` record (paired with MAST_common#212).
+
+**What.** Supersedes the share-path part of the 2026-10-19 entry. The orchestrator reads the session folder from `status.latest.spiral.shared_products_path` after `spiral_new_path`, and uses that path and each step's `image` as they are. `--share-root` is removed. A unit that does not report `latest.spiral`, or reports no share folder (its share is demoted), is refused and the session it opened is closed.
+
+**Implications.** A run reads the unit's frames by their UNC paths, so it must run on a Windows host on the share, as mast-ns-spec is. `result.json` records the `latest.spiral` record as the session opened.
+
 ## [2026-10-19] The orchestrator drives the unit's operator spiral and reads its frames from the share
 
 **Why.** Flux metering inside the unit reaches the mount, imager and stage directly, so it never tested what the unit's HTTP API can do, and the flux camera is not on the unit. The orchestrator was planned on 2026-10-13 around `expose` per step, with flux frames matched to each imager frame's window across the two hosts' clocks. That plan hit two walls: `expose` stops tracking after every run (MAST_unit#302, still open), and an `expose` inside an open spiral session overwrites the session's exposure series, after which the session cannot be closed until the unit service restarts (the overwrite in MAST_unit#232).

@@ -80,12 +80,15 @@ class Sky:
     cellless_step: int | None = None
     #: `spiral_end_path`'s final exposure fails; the session still closes, as the unit's does.
     end_fails: bool = False
-    #: The unit's frames will not reach the share (Z: unmapped).
+    #: The unit's share is demoted: its frames stay on the unit.
     share_unmapped: bool = False
+    #: A unit from before MAST_unit#349: no `latest.spiral` in its status.
+    predates_latest_spiral: bool = False
     #: A unit from before MAST_unit#136's fix: its RA step is RA coordinate, and it does not say so.
     predates_on_sky_steps: bool = False
     calls: list[str] = field(default_factory=list)
     acquisition: dict[str, Any] | None = None
+    spiral: dict[str, Any] | None = None
     at_preset: str | None = "sky"
     session_open: bool = False
     steps: int = 0
@@ -95,15 +98,19 @@ class Sky:
     def commanded_px(self, cell: tuple[int, int]) -> tuple[float, float]:
         return cell[0] * self.x_step_arcsec / PIXEL_SCALE, cell[1] * self.y_step_arcsec / PIXEL_SCALE
 
+    @property
+    def session_on_share(self) -> Path:
+        return self.share_root.joinpath(*SESSION_FOLDER.split("/"))
+
     def write_frame(self, name: str) -> str:
-        relative = f"{SESSION_FOLDER}/{name}"
-        path = self.share_root.joinpath(*relative.split("/"))
+        """Its path on the share, as the unit reports it."""
+        path = self.session_on_share / name
         path.parent.mkdir(parents=True, exist_ok=True)
         header = fits.Header()
         header["DEC"] = DEC_DEGREES
         header["PIXSCALE"] = PIXEL_SCALE
         fits.PrimaryHDU(data=star_field(*self.commanded_px(self.cell)), header=header).writeto(path)
-        return relative
+        return path.as_posix()
 
     # ------------------------------------------------------------------ the unit --
 
@@ -141,11 +148,11 @@ class Sky:
         if not self.predates_on_sky_steps:
             ra_step = self.x_step_arcsec / math.cos(math.radians(DEC_DEGREES))
             value |= {"dec_for_ra_step_degs": DEC_DEGREES, "ra_step_commanded_arcsec": ra_step}
-        if self.share_unmapped:
-            return envelope(value | {"folder": "C:/MAST/...", "shared_folder": None, "share_error": "not on the share"})
-        self.write_frame(REFERENCE)
-        value |= {"folder": "D:/MAST/...", "shared_folder": SESSION_FOLDER, "reference_image": REFERENCE}
-        return envelope(value)
+        shared = None if self.share_unmapped else self.session_on_share.as_posix()
+        self.spiral = {"started": "t", "ended": None, "succeeded": None, "errors": [], "shared_products_path": shared}
+        if not self.share_unmapped:
+            self.write_frame(REFERENCE)
+        return envelope(value | {"folder": "D:/MAST/...", "reference_image": REFERENCE})
 
     def _spiral_next_step(self, _params: dict[str, str]) -> httpx.Response:
         assert self.session_open and self._cells is not None
@@ -169,7 +176,7 @@ class Sky:
         # Written on every ending, as the unit's `_result` is, and only where the frames went.
         result = {"center_x": IMAGER_SIZE // 2, "center_y": IMAGER_SIZE // 2, "center_source": "fake"}
         if not self.share_unmapped:
-            path = self.share_root.joinpath(*SESSION_FOLDER.split("/"), "result.json")
+            path = self.session_on_share / "result.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(result))
         if self.end_fails:
@@ -177,7 +184,10 @@ class Sky:
         return envelope(result)
 
     def _status(self) -> dict[str, Any]:
-        status = {"latest": {"acquisition": self.acquisition}, "stage": {"at_preset": self.at_preset}}
+        latest: dict[str, Any] = {"acquisition": self.acquisition}
+        if not self.predates_latest_spiral:
+            latest["spiral"] = self.spiral
+        status = {"latest": latest, "stage": {"at_preset": self.at_preset}}
         # Each read moves the slow things one poll along.
         if self.acquisition is not None and self.acquisition["state"] == "running":
             self.acquisition = {**self.acquisition, "state": self.acquisition_outcome}

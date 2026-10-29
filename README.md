@@ -83,7 +83,7 @@ A step for which PWI4 reports no cell is measured and recorded but completes no 
 
 **Known gap.** The unit's in-built flux metering resets PWI4's spiral offset at the end of a run, returning the mount to the acquired pointing. The operator spiral does not, and the unit API has no call that does, so after a run the mount is left at the cell where the walk stopped (tracking off).
 
-**What the unit must have.** `status.latest.acquisition` (MAST_unit#346, moved under `latest` by MAST_unit#371), the spiral session's share paths and per-step timeout (MAST_unit#349), and spiral steps taken as angles on the sky (MAST_unit#136), which `spiral_new_path` confirms by reporting the RA step it commanded. Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
+**What the unit must have.** `status.latest.acquisition` (MAST_unit#346, moved under `latest` by MAST_unit#371), the spiral session's record in `status.latest.spiral` and per-step timeout (MAST_unit#349, with MAST_common#212), and spiral steps taken as angles on the sky (MAST_unit#136), which `spiral_new_path` confirms by reporting the RA step it commanded. Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
 
 ```
 python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55
@@ -93,7 +93,7 @@ python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --s
 
 Defaults follow the unit's own flux metering: 5 s exposures (imager and flux alike), 0.5" steps, 3 flux frames per step, 6 rings, 10" radius. `--center X Y` sets the fiber's imager position for the correlation; by default the unit resolves it from `guiding.rois[fcu_v2]`, then the frame center.
 
-**Products.** `<output-root>/<observing night>/flux-orchestrator/NNNN/`: every flux frame as `flux-<step>-<n>.fits`, and `result.json` with the parameters, each step (cell, ring, flux, the imager frame's path on the share) and the result (`dx`, `dy`, confidence, the arg-max cell, the commanded offset in pixels to compare against). `--output-root` defaults to `\\mast-ns-control\mast-share\MAST\mast-ns-spec`, and `--share-root`, where the unit's frames are read, to `\\mast-ns-control\mast-share\MAST`. `result.json` is written on every exit.
+**Products.** `<output-root>/<observing night>/flux-orchestrator/NNNN/`: every flux frame as `flux-<step>-<n>.fits`, and `result.json` with the parameters, each step (cell, ring, flux, the imager frame's path on the share) and the result (`dx`, `dy`, confidence, the arg-max cell, the commanded offset in pixels to compare against). `--output-root` defaults to `\\mast-ns-control\mast-share\MAST\mast-ns-spec`. The unit's frames are read by the share paths the unit reports (`status.latest.spiral.shared_products_path`, each step's `image`), so the orchestrator runs on a Windows host on the share. `result.json` is written on every exit.
 
 **Ctrl+C** aborts the unit while it acquires or moves the mirror, closes the spiral session (stopping tracking) once one has been requested, and leaves the unit alone once the session is closed. The exit status is 0 only for a converged run with a result.
 

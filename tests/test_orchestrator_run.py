@@ -34,7 +34,7 @@ def make_run(sky: Sky, tmp_path: Path, **overrides) -> Run:
     params = RunParams(unit=UNIT, seconds=1.0, target=Target(ra_j2000_hours=1.0, dec_j2000_degs=60.0), **overrides)
     unit = UnitClient(UNIT, client=httpx.Client(transport=httpx.MockTransport(sky.unit_handler)))
     meter = FluxMeterClient("http://flux", client=httpx.Client(transport=httpx.MockTransport(sky.flux_handler)))
-    return Run(params, unit, meter, share_root=sky.share_root, output_root=tmp_path / "out")
+    return Run(params, unit, meter, output_root=tmp_path / "out")
 
 
 def recorded(record) -> dict:
@@ -188,8 +188,19 @@ def test_the_record_is_written_when_closing_the_session_fails_too(sky, tmp_path,
     assert len(document["steps"]) == 1
 
 
+def test_a_unit_that_does_not_report_its_spiral_session_is_refused_and_the_session_closed(sky, tmp_path):
+    """Before MAST_unit#349 the session's share folder is nowhere in status."""
+    sky.predates_latest_spiral = True
+
+    with pytest.raises(UnitApiError, match="latest spiral"):
+        make_run(sky, tmp_path).run()
+
+    assert "spiral_next_step" not in sky.calls
+    assert sky.calls[-1] == "spiral_end_path"
+
+
 def test_a_session_whose_frames_miss_the_share_is_closed(sky, tmp_path):
-    """The unit opens the session, and starts tracking, before it reports the share problem."""
+    """The unit opens the session, and starts tracking, before status says the share is demoted."""
     sky.share_unmapped = True
     with pytest.raises(UnitApiError, match="will not reach the share"):
         make_run(sky, tmp_path).run()

@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -39,9 +39,6 @@ logger = logging.getLogger(__name__)
 
 #: What `spiral_new_path` reports once the unit takes its steps as angles on the sky (MAST_unit#136).
 RA_STEP_COMMANDED = "ra_step_commanded_arcsec"
-#: Where the unit's products appear on mast-ns-spec: the share's MAST root, which the unit's
-#: reported paths are relative to.
-DEFAULT_SHARE_ROOT = Path(r"\\mast-ns-control\mast-share\MAST")
 #: Beside the flux-meter service's own frames, under the share's tree for this host.
 DEFAULT_OUTPUT_ROOT = Path(r"\\mast-ns-control\mast-share\MAST\mast-ns-spec")
 RUN_FOLDER = "flux-orchestrator"
@@ -120,7 +117,7 @@ class Step:
     ring: int | None
     offset_arcsec: tuple[float, float] | None
     cell_error: str | None
-    #: Relative to the share's MAST root; None with `imager_error` when the unit saved none.
+    #: On the share, as the unit reports it; None with `imager_error` when the unit saved none.
     imager_frame: str | None
     imager_error: str | None
     flux: float | None
@@ -171,6 +168,8 @@ class RunRecord:
     terminal: Terminal | None = None
     error: str | None = None
     session: dict[str, Any] | None = None
+    #: `status.latest.spiral` as the session opened.
+    spiral: dict[str, Any] | None = None
     unit_end_path: dict[str, Any] | None = None
     unit_end_path_error: str | None = None
     steps: list[Step] = field(default_factory=list)
@@ -191,11 +190,6 @@ def make_run_folder(output_root: Path, now: datetime.datetime) -> Path:
     folder = parent / f"{max(numbers, default=0) + 1:0{SEQUENCE_DIGITS}d}"
     folder.mkdir()
     return folder
-
-
-def on_share(share_root: Path, relative: str) -> Path:
-    """The unit reports paths relative to the share's MAST root, always with forward slashes."""
-    return share_root.joinpath(*PurePosixPath(relative).parts)
 
 
 def read_arriving[T](path: Path, read: Callable[[Path], T]) -> T:
@@ -237,13 +231,11 @@ class Run:
         params: RunParams,
         unit: UnitClient,
         meter: FluxMeterClient,
-        share_root: Path = DEFAULT_SHARE_ROOT,
         output_root: Path = DEFAULT_OUTPUT_ROOT,
     ) -> None:
         self.params = params
         self.unit = unit
         self.meter = meter
-        self.share_root = share_root
         # Before the folder: a service that is not there should not leave an empty run behind.
         self.camera = meter.info()
         self.folder = make_run_folder(output_root, datetime.datetime.now(datetime.UTC))
@@ -300,11 +292,13 @@ class Run:
                 f"{p.unit}: the unit predates on-sky spiral steps (MAST_unit#136); its RA step would be "
                 "cos(dec) short on the sky"
             )
-        if session.get("shared_folder") is None:
-            raise UnitApiError(f"{p.unit}: the spiral's frames will not reach the share: {session.get('share_error')}")
-        self._shared_folder = session["shared_folder"]
+        spiral = self.unit.latest_spiral()
+        self.record.spiral = spiral
+        if spiral["shared_products_path"] is None:
+            raise UnitApiError(f"{p.unit}: the spiral's frames will not reach the share: the unit's share is demoted")
+        self._shared_folder = spiral["shared_products_path"]
         reference = f"{self._shared_folder}/{session['reference_image']}"
-        header, _data = read_frame(on_share(self.share_root, reference))
+        header, _data = read_frame(Path(reference))
         self._dec_degrees = numeric_card(header, DEC_CARD)
         self._pixel_scale = numeric_card(header, PIXEL_SCALE_CARD)
 
@@ -407,8 +401,8 @@ class Run:
             dx = dy = magnitude = 0.0
             confidence, at_origin, limit = None, None, None
         else:
-            _header, reference_data = read_frame(on_share(self.share_root, reference))
-            _header, final = read_frame(on_share(self.share_root, best.imager_frame))
+            _header, reference_data = read_frame(Path(reference))
+            _header, final = read_frame(Path(best.imager_frame))
             shift, magnitude, limit = measure_pair(
                 reference_data,
                 final,
@@ -447,7 +441,7 @@ class Run:
     def _center(self) -> tuple[int, int, str]:
         """The correlation's center, as the unit resolved it for its own session: read from the
         record the session leaves beside its frames, which it writes however it ended."""
-        session = read_json(on_share(self.share_root, f"{self._shared_folder}/{UNIT_SESSION_RESULT}"))
+        session = read_json(Path(f"{self._shared_folder}/{UNIT_SESSION_RESULT}"))
         return int(session["center_x"]), int(session["center_y"]), str(session["center_source"])
 
     def _commanded_offset_px(self, offset_arcsec: tuple[float, float] | None) -> tuple[float, float] | None:
