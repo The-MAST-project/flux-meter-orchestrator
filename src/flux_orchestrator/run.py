@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 from astropy.io import fits
 
-from flux_meter_service.models import Settings
+from flux_meter_service.models import CameraInfo, Settings
 from flux_meter_service.save import observing_night
 from flux_orchestrator.correlate import measure_pair
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
@@ -42,6 +42,7 @@ RA_STEP_COMMANDED = "ra_step_commanded_arcsec"
 #: Beside the flux-meter service's own frames, under the share's tree for this host.
 DEFAULT_OUTPUT_ROOT = Path(r"\\mast-ns-control\mast-share\MAST\mast-ns-spec")
 RUN_FOLDER = "flux-orchestrator"
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 RESULT_FILE = "result.json"
 #: What the unit's spiral session writes beside its frames, on every ending.
 UNIT_SESSION_RESULT = "result.json"
@@ -182,9 +183,9 @@ def _iso_now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
-def make_run_folder(output_root: Path, now: datetime.datetime) -> Path:
-    """`<output root>/<observing night>/flux-orchestrator/NNNN`, one past the highest already there."""
-    parent = output_root / observing_night(now) / RUN_FOLDER
+def make_run_folder(output_root: Path, now: datetime.datetime, kind: str = RUN_FOLDER) -> Path:
+    """`<output root>/<observing night>/<kind>/NNNN`, one past the highest already there."""
+    parent = output_root / observing_night(now) / kind
     parent.mkdir(parents=True, exist_ok=True)
     numbers = [int(p.name) for p in parent.iterdir() if p.is_dir() and _RUN_PATTERN.match(p.name)]
     folder = parent / f"{max(numbers, default=0) + 1:0{SEQUENCE_DIGITS}d}"
@@ -218,6 +219,25 @@ def read_frame(path: Path) -> tuple[fits.Header, np.ndarray]:
 
 def read_json(path: Path) -> dict[str, Any]:
     return read_arriving(path, lambda p: json.loads(p.read_text(encoding="utf-8")))
+
+
+def flux_frame_header(
+    frame: FluxFrame, camera: CameraInfo, unit: str, exposure_us: int, gain: int, black_level: int
+) -> fits.Header:
+    """What every flux frame says about itself, so one separated from its run is not anonymous.
+    No WCS: the camera sees only the light leaving the fiber."""
+    header = fits.Header()
+    header["DATE-OBS"] = (frame.requested.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3], "UTC, exposure requested")
+    header["DATE-END"] = (frame.received.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3], "UTC, frame received")
+    header["EXPTIME"] = (exposure_us / US_PER_S, "[s]")
+    header["GAIN"] = gain
+    header["BLKLEVEL"] = (black_level, "black level commanded on the camera")
+    header["INSTRUME"] = (camera.model, "the flux meter")
+    header["CAMSN"] = (camera.serial_number, "flux meter serial number")
+    header["SATURATE"] = (camera.saturation_level, "[counts] full scale")
+    header["TELESCOP"] = (unit, "the unit")
+    header["CREATOR"] = "flux-orchestrator"
+    return header
 
 
 def numeric_card(header: fits.Header, key: str) -> float | None:
@@ -452,23 +472,13 @@ class Run:
     def _write_flux_frame(
         self, name: str, frame: FluxFrame, index: int, cell: tuple[int, int] | None, ring: int | None
     ) -> None:
-        p, camera = self.params, self.camera
-        header = fits.Header()
-        header["DATE-OBS"] = (frame.requested.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3], "UTC, exposure requested")
-        header["DATE-END"] = (frame.received.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3], "UTC, frame received")
-        header["EXPTIME"] = (p.flux_exposure_us / US_PER_S, "[s]")
-        header["GAIN"] = p.flux_gain
-        header["BLKLEVEL"] = (p.flux_black_level, "black level commanded on the camera")
-        header["INSTRUME"] = (camera.model, "the flux meter")
-        header["CAMSN"] = (camera.serial_number, "flux meter serial number")
-        header["SATURATE"] = (camera.saturation_level, "[counts] full scale")
-        header["TELESCOP"] = (p.unit, "the unit")
+        p = self.params
+        header = flux_frame_header(frame, self.camera, p.unit, p.flux_exposure_us, p.flux_gain, p.flux_black_level)
         header["STEP"] = index
         if cell is not None:
             header["CELLX"] = (cell[0], "spiral cell, RA steps")
             header["CELLY"] = (cell[1], "spiral cell, Dec steps")
             header["RING"] = ring
-        header["CREATOR"] = "flux-orchestrator"
         fits.PrimaryHDU(data=frame.data, header=header).writeto(self.folder / name)
 
     def _write_record(self) -> None:

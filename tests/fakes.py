@@ -8,6 +8,8 @@ the commanded offset as its shift.
 
 from __future__ import annotations
 
+import copy
+import datetime
 import io
 import json
 import math
@@ -35,6 +37,11 @@ SPOT_PEAK_COUNTS = 800.0
 FLUX_BACKGROUND = 3.0
 #: How fast coupling falls off with distance from the peak cell, in cells.
 COUPLING_SIGMA_CELLS = 1.5
+#: The unit's clock runs this far ahead of mast-ns-spec's.
+UNIT_CLOCK_AHEAD_S = 2.0
+#: How far before the request a guide frame PHD2 hands back was taken.
+GUIDE_FRAME_AGE_S = 30.0
+EXPOSURES_FOLDER = f"{UNIT}/2026-10-29/Exposures"
 
 
 def spiral_cells() -> Iterator[tuple[int, int]]:
@@ -86,7 +93,25 @@ class Sky:
     predates_latest_spiral: bool = False
     #: A unit from before MAST_unit#136's fix: its RA step is RA coordinate, and it does not say so.
     predates_on_sky_steps: bool = False
+    #: A unit from before MAST_unit#385: it ignores `frames=false` and opens a session that takes frames.
+    predates_frameless: bool = False
+    #: A unit from before MAST_unit#327: `latest.exposure` carries no `frames`.
+    predates_frame_records: bool = False
+    #: The index, within every series, of a frame that fails.
+    failing_frame: int | None = None
+    #: PHD2 is guiding, so every series' first frame is the guide frame it already had.
+    guiding: bool = False
+    #: Every series fails before its first frame, as when the imager has gone away.
+    failing_series: bool = False
+    #: `spiral_end_path` is refused.
+    end_path_refused: bool = False
+    #: `unit/abort` answers and stops nothing, as when the work it waits on never lets go.
+    abort_lags: bool = False
     calls: list[str] = field(default_factory=list)
+    expose_params: list[dict[str, str]] = field(default_factory=list)
+    exposure: dict[str, Any] | None = None
+    frameless: bool = False
+    tracking_before_session: bool = False
     acquisition: dict[str, Any] | None = None
     spiral: dict[str, Any] | None = None
     at_preset: str | None = "sky"
@@ -124,7 +149,8 @@ class Sky:
             "spiral_new_path": self._spiral_new_path,
             "spiral_next_step": self._spiral_next_step,
             "spiral_end_path": self._spiral_end_path,
-            "abort": lambda _params: envelope(),
+            "expose": self._expose,
+            "abort": self._abort,
         }
         if method not in endpoints:
             return httpx.Response(404)
@@ -140,8 +166,11 @@ class Sky:
         return envelope()
 
     def _spiral_new_path(self, params: dict[str, str]) -> httpx.Response:
-        assert params["save_intermediate_exposures"] == "true"
+        self.frameless = params.get("frames") == "false" and not self.predates_frameless
+        if "frames" not in params:
+            assert params["save_intermediate_exposures"] == "true"
         self.x_step_arcsec, self.y_step_arcsec = float(params["x_step_arcsec"]), float(params["y_step_arcsec"])
+        self.tracking_before_session = self.tracking
         self.session_open, self.tracking, self.cell = True, True, (0, 0)
         self._cells = spiral_cells()
         value: dict[str, Any] = {}
@@ -149,13 +178,27 @@ class Sky:
             ra_step = self.x_step_arcsec / math.cos(math.radians(DEC_DEGREES))
             value |= {"dec_for_ra_step_degs": DEC_DEGREES, "ra_step_commanded_arcsec": ra_step}
         shared = None if self.share_unmapped else self.session_on_share.as_posix()
-        self.spiral = {"started": "t", "ended": None, "succeeded": None, "errors": [], "shared_products_path": shared}
+        self.spiral = {
+            "started": "t",
+            "ended": None,
+            "succeeded": None,
+            "errors": [],
+            "shared_products_path": shared,
+            "frames": not self.frameless,
+        }
+        if self.frameless:
+            return envelope({"folder": "D:/MAST/...", "reference_image": None})
         if not self.share_unmapped:
             self.write_frame(REFERENCE)
         return envelope(value | {"folder": "D:/MAST/...", "reference_image": REFERENCE})
 
+    def _exposing(self) -> bool:
+        return self.exposure is not None and self.exposure["ended"] is None
+
     def _spiral_next_step(self, _params: dict[str, str]) -> httpx.Response:
         assert self.session_open and self._cells is not None
+        if self._exposing():
+            return envelope(errors=["spiral_next_step: an exposure run is in flight"])
         self.steps += 1
         self.cell = next(self._cells)
         value: dict[str, Any] = {"step#": self.steps, "image": None}
@@ -163,15 +206,24 @@ class Sky:
             value["error"] = "PWI4 reported no spiral offset"
         else:
             value |= {"cell": list(self.cell), "ring": max(map(abs, self.cell))}
-        if self.steps == self.failing_step:
-            value["image_error"] = "exposure of 'step-0001.fits' failed"
-        else:
-            value["image"] = self.write_frame(f"step-{self.steps:04d}.fits")
+        if not self.frameless:
+            if self.steps == self.failing_step:
+                value["image_error"] = "exposure of 'step-0001.fits' failed"
+            else:
+                value["image"] = self.write_frame(f"step-{self.steps:04d}.fits")
         return envelope(value)
 
     def _spiral_end_path(self, _params: dict[str, str]) -> httpx.Response:
         if not self.session_open:
             return envelope(errors=["spiral_end_path: no spiral session is open"])
+        if self._exposing():
+            return envelope(errors=["spiral_end_path: an expose run is in flight"])
+        if self.end_path_refused:
+            return envelope(errors=["spiral_end_path: refused"])
+        if self.frameless:
+            self.session_open, self.tracking = False, self.tracking_before_session
+            self._end_spiral(succeeded=True)
+            return envelope({"steps": self.steps})
         self.session_open, self.tracking = False, False
         # Written on every ending, as the unit's `_result` is, and only where the frames went.
         result = {"center_x": IMAGER_SIZE // 2, "center_y": IMAGER_SIZE // 2, "center_source": "fake"}
@@ -183,8 +235,85 @@ class Sky:
             return envelope(errors=["spiral_end_path: final exposure failed"])
         return envelope(result)
 
+    def _end_spiral(self, succeeded: bool) -> None:
+        if self.spiral is not None:
+            self.spiral |= {"ended": self.unit_now().isoformat(), "succeeded": succeeded}
+
+    def unit_now(self) -> datetime.datetime:
+        return datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=UNIT_CLOCK_AHEAD_S)
+
+    def _expose(self, params: dict[str, str]) -> httpx.Response:
+        assert self.session_open and self.frameless, "expose only inside a frameless session"
+        assert not {"ra_j2000_hours", "dec_j2000_degs", "ra_offsets", "dec_offsets"} & params.keys()
+        if self._exposing():
+            return envelope(errors=["expose: an exposure run is already in flight"])
+        self.expose_params.append(params)
+        subfolder = params["subfolder"]
+        shared = None if self.share_unmapped else (self.share_root / EXPOSURES_FOLDER / subfolder).as_posix()
+        self.exposure = {
+            "started": self.unit_now().isoformat(),
+            "ended": None,
+            "succeeded": None,
+            "errors": [],
+            "local_products_path": f"D:/MAST/{EXPOSURES_FOLDER}/{subfolder}",
+            "shared_products_path": shared,
+            "exposure_seconds": float(params["exposure_seconds"]),
+            "repeats": int(params["repeats"]),
+            "frames": [],
+            "completed": 0,
+        }
+        return envelope()
+
+    def _advance_exposure(self) -> None:
+        """One frame per status read; the series ends with its last."""
+        exposure = self.exposure
+        if exposure is None or exposure["ended"] is not None:
+            return
+        if self.failing_series:
+            failure = "the exposure run failed: PHD2 is not connected"
+            exposure |= {"ended": self.unit_now().isoformat(), "succeeded": False, "errors": [failure]}
+            return
+        n = len(exposure["frames"])
+        frame: dict[str, Any] = {"name": f"{n:04d}.fits", "date_obs": None, "exposure_seconds": None, "error": None}
+        if n == self.failing_frame:
+            frame["error"] = "PHD2 saved no file"
+        else:
+            # A series runs in milliseconds here, so a frame is stamped no earlier than its request.
+            requested = datetime.datetime.fromisoformat(exposure["started"])
+            started = max(requested, self.unit_now() - datetime.timedelta(seconds=exposure["exposure_seconds"]))
+            if self.guiding and n == 0:
+                started = requested - datetime.timedelta(seconds=GUIDE_FRAME_AGE_S)
+            frame |= {"date_obs": started.isoformat(), "exposure_seconds": exposure["exposure_seconds"]}
+        exposure["frames"].append(frame)
+        exposure["completed"] = sum(1 for f in exposure["frames"] if f["error"] is None)
+        if len(exposure["frames"]) == exposure["repeats"]:
+            # As the unit does: a series with a failed frame did not succeed.
+            failure = None if exposure["completed"] == exposure["repeats"] else f"{exposure['completed']} of {n + 1} frames"
+            exposure |= {
+                "ended": self.unit_now().isoformat(),
+                "succeeded": failure is None,
+                "errors": [failure] if failure else [],
+            }
+
+    def _abort(self, _params: dict[str, str]) -> httpx.Response:
+        if self.abort_lags:
+            return envelope()
+        if self.exposure is not None and self.exposure["ended"] is None:
+            self.exposure |= {"ended": self.unit_now().isoformat(), "succeeded": False}
+        if self.session_open:
+            self.session_open = False
+            self.tracking = self.tracking_before_session if self.frameless else False
+            self._end_spiral(succeeded=False)
+        return envelope()
+
     def _status(self) -> dict[str, Any]:
         latest: dict[str, Any] = {"acquisition": self.acquisition}
+        if self.exposure is not None:
+            shown = copy.deepcopy(self.exposure)
+            if self.predates_frame_records:
+                shown.pop("frames")
+            latest["exposure"] = shown
+        self._advance_exposure()
         if not self.predates_latest_spiral:
             latest["spiral"] = self.spiral
         status = {"latest": latest, "stage": {"at_preset": self.at_preset}}

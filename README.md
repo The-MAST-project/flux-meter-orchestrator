@@ -83,7 +83,7 @@ A step for which PWI4 reports no cell is measured and recorded but completes no 
 
 **Known gap.** The unit's in-built flux metering resets PWI4's spiral offset at the end of a run, returning the mount to the acquired pointing. The operator spiral does not, and the unit API has no call that does, so after a run the mount is left at the cell where the walk stopped (tracking off).
 
-**What the unit must have.** `status.latest.acquisition` (MAST_unit#346, moved under `latest` by MAST_unit#371), the spiral session's record in `status.latest.spiral` and per-step timeout (MAST_unit#349, with MAST_common#212), and spiral steps taken as angles on the sky (MAST_unit#136), which `spiral_new_path` confirms by reporting the RA step it commanded. Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; the orchestrator never calls `expose`, which wedges an open spiral session (MAST_unit#232).
+**What the unit must have.** `status.latest.acquisition` (MAST_unit#346, moved under `latest` by MAST_unit#371), the spiral session's record in `status.latest.spiral` and per-step timeout (MAST_unit#349, with MAST_common#212), and spiral steps taken as angles on the sky (MAST_unit#136), which `spiral_new_path` confirms by reporting the RA step it commanded. Against a unit without them the run fails at that step with the unit's own error. The spiral stays on the unit; this run never calls `expose`, which the unit refuses while a spiral session that takes frames is open (MAST_unit#385).
 
 ```
 python -m flux_orchestrator --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55
@@ -98,6 +98,27 @@ Defaults follow the unit's own flux metering: 5 s exposures (imager and flux ali
 **Ctrl+C** aborts the unit while it acquires or moves the mirror, closes the spiral session (stopping tracking) once one has been requested, and leaves the unit alone once the session is closed. The exit status is 0 only for a converged run with a result.
 
 The photometry and the correlation are copies of MAST_unit's (`aperture_photometry_single.py`, `frame_shift.py`), kept as they are there until the unit's flux metering is removed.
+
+## Save-spirals run
+
+Param's fixed-ring run (`acquire_and_save_spirals` in the unit's flux-metering branch), driven through the unit's public API. It measures nothing: it walks `--rings` rings of PWI4's spiral, `(2 × rings + 1)²` cells, and saves imager and flux frames at every cell for analysis afterwards.
+
+1. Acquisition (`--acquisition-seconds`) and the folding mirror, as above.
+2. The unit opens a spiral session that takes no frames (`spiral_new_path`, `frames=false`), confirmed by `status.latest.spiral.frames`.
+3. At each cell, `expose` takes `--frames` imager frames (`--step-seconds`, full frame, bin 1) into a subfolder of its own, `save-spirals-<night>-<NNNN>-<ring>-<step>`. From the moment `expose` answers, flux frames (`--flux-seconds`) are taken back to back until `status.latest.exposure` says the series has ended. `spiral_next_step` then moves to the next cell. The walk ends when PWI4 reports a cell beyond the last ring, or after the last cell. A failed imager frame is recorded and the walk goes on; a series that saved no frame at all, or whose frames will not reach the share (the unit's share demoted, known from the first read), fails the run.
+4. `spiral_end_path` closes the session, leaving tracking as it was found.
+
+**Pairing.** Each imager frame's window is its `DATE-OBS` and exposure from `status.latest.exposure.frames`, in the unit's clock. The clock offset is measured at every cell: the unit stamps the record's `started` between receiving `expose` and answering it, so the offset lies within that round trip. The imager window, moved onto this host's clock, is paired with the flux frame that overlaps it most. A flux frame's window is the whole request, transfer included. An imager frame whose `DATE-OBS` predates the request is flagged (`predates_request`): PHD2, guiding, handed back the guide frame it already had.
+
+**What the unit must have**, beyond the above: frameless spiral sessions (MAST_unit#385) and per-frame records in `status.latest.exposure` (MAST_unit#327). A unit without them fails the run at the first point it shows, and is aborted.
+
+```
+python -m flux_orchestrator.save_spirals --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55 --rings 2 --frames 3
+```
+
+**Products.** `<output-root>/<observing night>/save-spirals/NNNN/`: the flux frames as `flux-<ring>-<step>-<n>.fits`, each header naming its cell, ring and the imager subfolder (`IMGDIR`), and `result.json`, rewritten after every cell, with the parameters and, per cell, the unit's exposure record, the share folder of its imager frames, the clock offset and the pairs. The imager frames stay where the unit files them, under the night's `Exposures` folder on the share.
+
+**Ctrl+C or a failure** after the unit was first asked anything aborts it (`unit/abort`), which ends a series in flight and closes the session; `spiral_end_path` would refuse while one is in flight. A `spiral_end_path` that fails is a failure too. `unit/abort` answers before it has stopped anything, so the run then reads the unit's status until `latest.spiral` and `latest.exposure` have ended, for up to 30 s, and records whether they did (`unit_abort_confirmed`). The exit status is 0 only for a completed walk whose session closed.
 
 ## Development
 
@@ -123,6 +144,7 @@ src/flux_meter_service/
   fake.py       noise frames for --fake
 src/flux_orchestrator/
   __main__.py                    CLI
+  save_spirals.py                the save-spirals run and its CLI: frameless session, expose per cell, pairing
   run.py                         one run: acquire, mirror, spiral walk, correlation, products
   unit_client.py                 the unit's public HTTP API
   flux_client.py                 this service's contract
@@ -134,6 +156,7 @@ src/flux_orchestrator/
 tests/
   fakes.py                       a unit and the service faked at the HTTP layer, sharing one sky
   test_orchestrator_run.py       whole runs against the fakes
+  test_save_spirals.py           save-spirals runs, the clock offset and the pairing
   test_orchestrator_rules.py     the stopping rule and the median
   test_orchestrator_photometry.py  detection, darkness and spikes
   test_service.py   endpoints in process against a stub camera

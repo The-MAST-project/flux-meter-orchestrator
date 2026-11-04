@@ -1,5 +1,19 @@
 # Decisions
 
+## [2026-10-29] The save-spirals run: a frameless session, `expose` per cell, pairing across the clocks
+
+**Why.** Param's save-spirals run (`acquire_and_save_spirals`, in the unit's flux-metering branch) starts an imager frame and a flux frame together at every cell, which the in-unit code can do and the operator spiral cannot: it takes exactly one frame per step. The spiral logic stays in the unit, one point of reference for every spiral-like process, so the unit gained a session that only moves (MAST_unit#385) and per-frame records in `status.latest.exposure` (MAST_unit#327). Param does not read the run's `result.json`, so its layout is the orchestrator's own.
+
+**What.**
+- A separate command, `python -m flux_orchestrator.save_spirals`, with its own products folder (`save-spirals/NNNN`) and record; the max-flux run is unchanged.
+- At each cell `expose` takes the imager frames into a subfolder of their own; flux frames run back to back from `expose`'s answer until the unit's record of the series ends, and each imager frame is paired with the flux frame overlapping it most.
+- The clock offset is bracketed at every cell by `expose`'s round trip around the record's `started`, rather than measured once with `w32tm` before the run as the 2026-10-13 plan had it: it uses only the public API, needs no NTP service on the unit, and tracks drift through the run.
+- A failed imager frame is recorded and the walk goes on, as `expose` itself does; the in-unit run stopped on one. A series that saved no frame (the imager gone) fails the run rather than walking the rest of the spiral empty, and so does a demoted share, checked on the first read of the series rather than after it.
+- An interruption or failure aborts the unit (`unit/abort`, which closes the session) rather than calling `spiral_end_path`, which refuses while a series is in flight. A `spiral_end_path` that fails is a failure, so it aborts too: a frameless session left open keeps the mount tracking until the unit's session timeout. `unit/abort` answers before it has stopped anything, so the run reads `latest.spiral` and `latest.exposure` until both have ended and records whether they did, rather than taking the answer as the release.
+- The flux frames' shared header cards moved into `run.flux_frame_header`, used by both runs.
+
+**Implications.** The pairing depends on PHD2's `DATE-OBS` being the frame's real start, true when PHD2 is not guiding; a frame it hands back while guiding is flagged, not paired. The imager frames' gain defaults to `expose`'s, not the acquisition's. A run needs a unit with MAST_unit#385, #327 and #136 together. The frameless `spiral_new_path` does not report the RA step it commanded, so the run does not check for #136 as the max-flux run does: #385 merged after #136, and a session that reports `frames` false comes from a unit that has both.
+
 ## [2026-10-29] The spiral session's share folder comes from `status.latest.spiral`
 
 **Why.** MAST_unit#349 first reported the session folder and step frames relative to the share's MAST root, because the share was spelled differently on each host. Since MAST_common#200 every Windows host reaches the share by the same UNC path, `//mast-ns-control/mast-share/MAST/`, mast-ns-spec included, and the unit's run records (`status.latest.*`, MAST_common `LatestBase`) already carry each run's folder on the share. #349 was reworked onto a `latest.spiral` record (paired with MAST_common#212).

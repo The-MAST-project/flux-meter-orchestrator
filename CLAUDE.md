@@ -23,7 +23,7 @@ The other half is `RemoteFluxMeter` in MAST_unit `src/flux_metering/remote.py`. 
 ## Rules
 
 - No dependency on MAST_common, MAST_unit or MAST_spec.
-- The orchestrator drives a unit through its public HTTP API only (MAST_common `docs/scripting-the-api.md`), and never calls `expose` inside a spiral session. A missing capability is fixed in MAST_unit, not worked around here.
+- The orchestrator drives a unit through its public HTTP API only (MAST_common `docs/scripting-the-api.md`), and calls `expose` only inside a spiral session opened with `frames=false`. A missing capability is fixed in MAST_unit, not worked around here.
 - `aperture_photometry_single.py` and `frame_shift.py` are copies of MAST_unit's; keep them comparable until the unit's go.
 - Saved-frame paths (`<save-root>/<night>/flux-meter/flux-NNNN.fits`) are read by people and scripts; change them only deliberately.
 - `--port` stays required: the port is the units' `FLUX_METER_PORT` (8003, in MAST_unit `src/flux_metering/remote.py`).

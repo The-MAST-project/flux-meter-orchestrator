@@ -143,7 +143,18 @@ class UnitClient:
             timeout=exposure_seconds + STEP_OVERHEAD_S,
         )
 
-    def spiral_next_step(self, exposure_seconds: float) -> SpiralStep:
+    def spiral_new_frameless_path(self, x_step_arcsec: float, y_step_arcsec: float) -> dict[str, Any]:
+        """Open a spiral session that only moves the mount, leaving the frames to `expose`
+        (MAST_unit#385). The session is reported in `latest_spiral`, with `frames` false."""
+        return self._request(
+            "PUT",
+            "spiral_new_path",
+            {"x_step_arcsec": x_step_arcsec, "y_step_arcsec": y_step_arcsec, "frames": False},
+            timeout=STEP_OVERHEAD_S,
+        )
+
+    def spiral_next_step(self, exposure_seconds: float = 0.0) -> SpiralStep:
+        """`exposure_seconds` is the step frame's; a frameless session takes none."""
         value = self._request("PUT", "spiral_next_step", {}, timeout=exposure_seconds + STEP_OVERHEAD_S)
         cell = (int(value["cell"][0]), int(value["cell"][1])) if "cell" in value else None
         return SpiralStep(
@@ -163,9 +174,39 @@ class UnitClient:
             raise UnitApiError(f"{self.name}: status reports no latest spiral session; the unit predates it")
         return spiral
 
-    def spiral_end_path(self, exposure_seconds: float) -> dict[str, Any]:
-        """Close the session: the unit takes its final frame, correlates it, and stops tracking."""
+    def spiral_end_path(self, exposure_seconds: float = 0.0) -> dict[str, Any]:
+        """Close the session. One with frames takes its final frame, correlates it and stops
+        tracking; a frameless one leaves tracking as `spiral_new_path` found it."""
         return self._request("PUT", "spiral_end_path", {}, timeout=exposure_seconds + STEP_OVERHEAD_S)
+
+    def expose(self, subfolder: str, exposure_seconds: float, repeats: int, gain: int | None) -> None:
+        """Start an exposure series where the mount points, into `subfolder` of the night's
+        exposures. Answered before the first frame; the unit replaces `status.latest.exposure`
+        before it answers, so `latest_exposure` then describes this series."""
+        self._request(
+            "PUT",
+            "expose",
+            {"subfolder": subfolder, "exposure_seconds": exposure_seconds, "repeats": repeats, "gain": gain},
+        )
+
+    def latest_exposure(self) -> dict[str, Any]:
+        """`status.latest.exposure`: the last `expose` series, with each frame it attempted."""
+        exposure = (self.status().get("latest") or {}).get("exposure")
+        if exposure is None:
+            raise UnitApiError(f"{self.name}: status reports no latest exposure")
+        return exposure
+
+    def wait_for_released(self, timeout_s: float) -> None:
+        """Wait for `latest.spiral` and `latest.exposure` to say they have ended: `unit/abort`
+        answers before it has stopped them."""
+        self._wait_for("the spiral session and the exposure series to end", timeout_s, self._released)
+
+    @staticmethod
+    def _released(status: dict[str, Any]) -> bool:
+        latest = status.get("latest") or {}
+        return all(
+            record is None or record["ended"] is not None for record in (latest.get("spiral"), latest.get("exposure"))
+        )
 
     @staticmethod
     def _latest_acquisition(status: dict[str, Any]) -> dict[str, Any] | None:

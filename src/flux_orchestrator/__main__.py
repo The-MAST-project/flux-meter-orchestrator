@@ -14,11 +14,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from flux_orchestrator.flux_client import FluxMeterClient
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, Run, RunParams
+from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, Run, RunParams
 from flux_orchestrator.spiral import Terminal
 from flux_orchestrator.unit_client import UNIT_PORT, Target, UnitClient
 
-LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 DEFAULTS = RunParams(unit="")
 
 
