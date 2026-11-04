@@ -93,6 +93,8 @@ class Sky:
     predates_latest_spiral: bool = False
     #: A unit from before MAST_unit#136's fix: its RA step is RA coordinate, and it does not say so.
     predates_on_sky_steps: bool = False
+    #: A unit whose `latest.spiral` does not report the RA step it commanded.
+    predates_latest_ra_step: bool = False
     #: A unit from before MAST_unit#385: it ignores `frames=false` and opens a session that takes frames.
     predates_frameless: bool = False
     #: A unit from before MAST_unit#327: `latest.exposure` carries no `frames`.
@@ -186,6 +188,8 @@ class Sky:
             "shared_products_path": shared,
             "frames": not self.frameless,
         }
+        if not self.predates_latest_ra_step:
+            self.spiral |= value
         if self.frameless:
             return envelope({"folder": "D:/MAST/...", "reference_image": None})
         if not self.share_unmapped:

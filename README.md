@@ -110,7 +110,7 @@ Param's fixed-ring run (`acquire_and_save_spirals` in the unit's flux-metering b
 
 **Pairing.** Each imager frame's window is its `DATE-OBS` and exposure from `status.latest.exposure.frames`, in the unit's clock. The clock offset is measured at every cell: the unit stamps the record's `started` between receiving `expose` and answering it, so the offset lies within that round trip. The imager window, moved onto this host's clock, is paired with the flux frame that overlaps it most. A flux frame's window is the whole request, transfer included. An imager frame whose `DATE-OBS` predates the request is flagged (`predates_request`): PHD2, guiding, handed back the guide frame it already had.
 
-**What the unit must have**, beyond the above: frameless spiral sessions (MAST_unit#385) and per-frame records in `status.latest.exposure` (MAST_unit#327). A unit without them fails the run at the first point it shows, and is aborted.
+**What the unit must have**, beyond the above: frameless spiral sessions (MAST_unit#385), the commanded RA step in `status.latest.spiral` (MAST_unit#391, with MAST_common#217), and per-frame records in `status.latest.exposure` (MAST_unit#327). A unit without them fails the run at the first point it shows, and is aborted.
 
 ```
 python -m flux_orchestrator.save_spirals --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55 --rings 2 --frames 3

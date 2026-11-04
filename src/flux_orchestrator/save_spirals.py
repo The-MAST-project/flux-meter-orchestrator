@@ -34,7 +34,7 @@ from astropy.io import fits
 from flux_meter_service.models import Settings
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
 from flux_orchestrator.photometry import saturated_pixels
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, flux_frame_header, make_run_folder
+from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, RA_STEP_COMMANDED, flux_frame_header, make_run_folder
 from flux_orchestrator.unit_client import UNIT_PORT, SpiralStep, Target, UnitApiError, UnitClient
 
 logger = logging.getLogger(__name__)
@@ -277,6 +277,11 @@ class SpiralsRun:
         if self.record.spiral.get("frames") is not False:
             raise UnitApiError(
                 f"{p.unit}: the unit predates frameless spiral sessions (MAST_unit#385); it opened one that takes frames"
+            )
+        if self.record.spiral.get(RA_STEP_COMMANDED) is None:
+            raise UnitApiError(
+                f"{p.unit}: status.latest.spiral reports no commanded RA step, so the unit's spiral steps cannot "
+                "be confirmed square on the sky (MAST_unit#136)"
             )
 
         terminal = self._walk()

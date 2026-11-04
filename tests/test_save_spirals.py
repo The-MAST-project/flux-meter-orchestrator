@@ -202,6 +202,22 @@ def test_a_unit_without_frameless_sessions_is_refused_and_aborted(sky, tmp_path)
     assert aborted(sky) and not sky.session_open
 
 
+def test_a_unit_whose_spiral_record_has_no_ra_step_is_refused_and_aborted(sky, tmp_path):
+    sky.predates_latest_ra_step = True
+
+    with pytest.raises(UnitApiError, match="commanded RA step"):
+        make_run(sky, tmp_path).run()
+
+    assert "expose" not in sky.calls
+    assert aborted(sky) and not sky.session_open
+
+
+def test_the_record_keeps_the_ra_step_the_unit_commanded(sky, tmp_path):
+    record = make_run(sky, tmp_path, rings=0).run()
+
+    assert record.spiral is not None and record.spiral["ra_step_commanded_arcsec"] > record.params.x_step_arcsec
+
+
 def test_a_unit_without_frame_records_is_refused(sky, tmp_path):
     sky.predates_frame_records = True
     run = make_run(sky, tmp_path)

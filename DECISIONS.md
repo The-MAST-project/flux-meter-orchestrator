@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-04] The save-spirals run reads the commanded RA step from `status.latest.spiral`
+
+**Why.** The frameless `spiral_new_path` answers with no `ra_step_commanded_arcsec`, so the 2026-10-29 entry dropped the check for on-sky spiral steps (MAST_unit#136) and leaned on merge order instead: a unit with frameless sessions has #136 too. That holds for `main` but is an inference, not something the unit says.
+
+**What.** `status.latest.spiral` reports `ra_step_commanded_arcsec` and `dec_for_ra_step_degs` for either kind of session (MAST_unit#391, with MAST_common#217), and the save-spirals run refuses a session whose record lacks them, as the max-flux run refuses a response without them. **Supersedes** the last sentence of the 2026-10-29 entry's *Implications*.
+
+**Implications.** Until that change is on a unit, the save-spirals run refuses it right after opening the session, and aborts it.
+
 ## [2026-10-29] The save-spirals run: a frameless session, `expose` per cell, pairing across the clocks
 
 **Why.** Param's save-spirals run (`acquire_and_save_spirals`, in the unit's flux-metering branch) starts an imager frame and a flux frame together at every cell, which the in-unit code can do and the operator spiral cannot: it takes exactly one frame per step. The spiral logic stays in the unit, one point of reference for every spiral-like process, so the unit gained a session that only moves (MAST_unit#385) and per-frame records in `status.latest.exposure` (MAST_unit#327). Param does not read the run's `result.json`, so its layout is the orchestrator's own.
