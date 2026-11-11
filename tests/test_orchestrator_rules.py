@@ -42,6 +42,17 @@ class TestRingRule:
         steps = [(1.0, 0), (2.0, 1), (3.0, 2), (4.0, 3)]
         assert walk(rule, steps) == (Terminal.MAX_RINGS, 4)
 
+    def test_a_walk_that_measures_nothing_searches_on_to_max_rings(self):
+        """A dark start is not a peak: with no measured step, no ring is judged."""
+        rule = RingRule(patience_rings=1, max_rings=3)
+        steps = [(None, 0)] + [(None, 1)] * 8 + [(None, 2)] * 16 + [(None, 3)] * 24 + [(None, 4)]
+        assert walk(rule, steps) == (Terminal.MAX_RINGS, len(steps))
+
+    def test_the_first_measured_step_starts_the_patience(self):
+        rule = RingRule(patience_rings=1, max_rings=6)
+        steps = [(None, 0)] + [(None, 1)] * 8 + [(None, 2), (40.0, 2)] + [(5.0, 2)] * 14 + [(1.0, 3)] * 24 + [(1.0, 4)]
+        assert walk(rule, steps) == (Terminal.CONVERGED, len(steps))
+
     def test_an_unmeasurable_step_is_never_the_best(self):
         rule = RingRule(patience_rings=1, max_rings=6)
         rule.update(0, None, 0)

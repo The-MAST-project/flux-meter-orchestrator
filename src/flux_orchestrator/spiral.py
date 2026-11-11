@@ -65,7 +65,8 @@ class RingRule:
                 self.best_ring = ring
 
         if ring is not None and ring > self.current_ring:
-            completed_with_improvement = self.best_ring >= self.current_ring
+            # Until a step is measured there is no peak to improve on, so no ring counts against it.
+            completed_with_improvement = self.best_flux is None or self.best_ring >= self.current_ring
             self.rings_without_improvement = 0 if completed_with_improvement else self.rings_without_improvement + 1
             self.current_ring = ring
             if self.rings_without_improvement >= self.patience_rings:
