@@ -258,3 +258,10 @@ def test_the_walk_stops_at_the_radius_cap(sky, tmp_path):
     sky.peak_cell = (2, 2)  # brightening outward, so the ring rule keeps going and the cap stops it
     record = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0, max_radius_arcsec=4.0).run()
     assert record.terminal == Terminal.MAX_RADIUS
+
+
+def test_local_frames_reads_a_demoted_units_frames_from_its_own_disk(sky, tmp_path):
+    """Run on the unit itself while the share is down: its frames are where it reports them."""
+    sky.share_unmapped = True
+    record = make_run(sky, tmp_path, x_step_arcsec=4.0, y_step_arcsec=2.0, local_frames=True).run()
+    assert record.result is not None and record.result.argmax_cell == sky.peak_cell

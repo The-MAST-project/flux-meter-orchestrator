@@ -129,9 +129,18 @@ class Sky:
     def session_on_share(self) -> Path:
         return self.share_root.joinpath(*SESSION_FOLDER.split("/"))
 
+    @property
+    def session_on_unit(self) -> Path:
+        """Where the frames stay while the share is demoted."""
+        return self.share_root.parent.joinpath("unit", *SESSION_FOLDER.split("/"))
+
+    @property
+    def session_folder(self) -> Path:
+        return self.session_on_unit if self.share_unmapped else self.session_on_share
+
     def write_frame(self, name: str) -> str:
         """Its path on the share, as the unit reports it."""
-        path = self.session_on_share / name
+        path = self.session_folder / name
         path.parent.mkdir(parents=True, exist_ok=True)
         header = fits.Header()
         header["DEC"] = DEC_DEGREES
@@ -185,6 +194,7 @@ class Sky:
             "ended": None,
             "succeeded": None,
             "errors": [],
+            "local_products_path": self.session_on_unit.as_posix(),
             "shared_products_path": shared,
             "frames": not self.frameless,
         }
@@ -192,8 +202,7 @@ class Sky:
             self.spiral |= value
         if self.frameless:
             return envelope({"folder": "D:/MAST/...", "reference_image": None})
-        if not self.share_unmapped:
-            self.write_frame(REFERENCE)
+        self.write_frame(REFERENCE)
         return envelope(value | {"folder": "D:/MAST/...", "reference_image": REFERENCE})
 
     def _exposing(self) -> bool:
@@ -231,10 +240,9 @@ class Sky:
         self.session_open, self.tracking = False, False
         # Written on every ending, as the unit's `_result` is, and only where the frames went.
         result = {"center_x": IMAGER_SIZE // 2, "center_y": IMAGER_SIZE // 2, "center_source": "fake"}
-        if not self.share_unmapped:
-            path = self.session_on_share / "result.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(result))
+        path = self.session_folder / "result.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result))
         if self.end_fails:
             return envelope(errors=["spiral_end_path: final exposure failed"])
         return envelope(result)

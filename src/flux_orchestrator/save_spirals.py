@@ -34,7 +34,15 @@ from astropy.io import fits
 from flux_meter_service.models import Settings
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
 from flux_orchestrator.photometry import saturated_pixels
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, RA_STEP_COMMANDED, flux_frame_header, make_run_folder
+from flux_orchestrator.run import (
+    DEFAULT_OUTPUT_ROOT,
+    LOCAL_FRAMES_HELP,
+    LOG_FORMAT,
+    RA_STEP_COMMANDED,
+    flux_frame_header,
+    frames_folder,
+    make_run_folder,
+)
 from flux_orchestrator.unit_client import UNIT_PORT, SpiralStep, Target, UnitApiError, UnitClient
 
 logger = logging.getLogger(__name__)
@@ -79,6 +87,8 @@ class SpiralsParams:
     number_of_frames: int = 1
     #: Engineering only: walk wherever the mount points. Echoed into the result.
     skip_acquisition: bool = False
+    #: Run on the unit itself: record its own folder while its share is demoted.
+    local_frames: bool = False
 
     @property
     def flux_exposure_us(self) -> int:
@@ -151,7 +161,7 @@ class FluxFrameRecord:
 
 @dataclass
 class Pair:
-    #: Under the cell's `shared_folder`.
+    #: Under the cell's `shared_folder` (the unit's own folder with `local_frames`).
     imager_frame: str
     imager_error: str | None
     #: The frame's `DATE-OBS`, in the unit's clock, as the unit reports it.
@@ -341,7 +351,7 @@ class SpiralsRun:
                 )
             )
             exposure = self._own_exposure(subfolder)
-            if exposure["shared_products_path"] is None:
+            if frames_folder(exposure, p.local_frames) is None:
                 raise UnitApiError(
                     f"{p.unit}: the frames in '{subfolder}' will not reach the share: the unit's share is demoted"
                 )
@@ -353,7 +363,7 @@ class SpiralsRun:
         if exposure["completed"] == 0:
             raise UnitApiError(f"{p.unit}: the series in '{subfolder}' saved no frames: {'; '.join(exposure['errors'])}")
         cell.exposure = exposure
-        cell.shared_folder = exposure["shared_products_path"]
+        cell.shared_folder = frames_folder(exposure, p.local_frames)
         cell.clock_offset = ClockOffset.bracketed(_parse_utc(exposure["started"]), sent, answered)
         cell.pairs = self._pairs(exposure, cell.clock_offset, flux, cell.flux_frames)
         logger.info(
@@ -497,6 +507,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     paths = parser.add_argument_group("paths")
     paths.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help=f"default {DEFAULT_OUTPUT_ROOT}")
+    paths.add_argument("--local-frames", action="store_true", help=LOCAL_FRAMES_HELP)
 
     args = parser.parse_args(argv)
     if (args.ra is None) != (args.dec is None):
@@ -521,6 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         flux_black_level=args.flux_black_level,
         number_of_frames=args.frames,
         skip_acquisition=args.skip_acquisition,
+        local_frames=args.local_frames,
     )
     run = SpiralsRun(
         params, UnitClient(args.unit, port=args.unit_port), FluxMeterClient(args.flux_meter), output_root=args.output_root

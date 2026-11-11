@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-11] `--local-frames`: read a demoted unit's frames from its own disk
+
+**Why.** Both runs read or record the unit's frames by their share path, and refuse a unit whose share is demoted. With mast-ns-control's share down, no run could reach a unit at all, though a run on the unit itself can read the frames where the unit keeps them.
+
+**What.** An opt-in `--local-frames` on both commands: while the unit reports no `shared_products_path`, its `local_products_path` is used instead. Without the flag a demoted share is still refused. The save-spirals `result.json` keeps its `shared_folder` key, which then holds the unit's own folder.
+
+**Implications.** Meant for a run on the unit itself; from any other host the unit's local path does not resolve and the read times out as a lost frame. If the share comes back mid-run, the unit's mover takes the frames off its disk and a later read can miss them.
+
 ## [2026-11-04] The save-spirals run reads the commanded RA step from `status.latest.spiral`
 
 **Why.** The frameless `spiral_new_path` answers with no `ra_step_commanded_arcsec`, so the 2026-10-29 entry dropped the check for on-sky spiral steps (MAST_unit#136) and leaned on merge order instead: a unit with frameless sessions has #136 too. That holds for `main` but is an inference, not something the unit says.
