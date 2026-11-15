@@ -1,10 +1,10 @@
 # flux-meter-orchestrator
 
-HTTP service that holds the Thorlabs Zelux flux camera on `mast-ns-spec` and serves it to MAST units, and `flux_orchestrator`, which runs flux metering from mast-ns-spec against one unit: the max-flux run, and Param's save-spirals and fiber-focus runs. See `README.md` and `DECISIONS.md`.
+HTTP service that holds the Thorlabs Zelux flux camera on `mast-ns-spec` and serves it to MAST units, and `flux_orchestrator`, which runs flux metering from mast-ns-spec against one unit: the max-flux run, and Param's save-spirals and fiber-focus runs. `flux_orchestrator.app` is an interactive Textual app over the three. See `README.md` and `DECISIONS.md`.
 
 ## Commands
 
-- Tests: `.venv/bin/python -m pytest`
+- Tests: `.venv/bin/python -m pytest` (the app's run headless under Textual's Pilot; no async plugin, see `tests/test_app.py`)
 - Lint and format: `.venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
 - Types: `npx pyright`
 - Dependencies are managed with uv (`uv.lock`); the venv is `.venv/`, Python 3.12.

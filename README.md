@@ -154,6 +154,22 @@ python -m flux_orchestrator.fiber_focus --unit mast03 --flux-meter http://mast-n
 
 **Differences from the in-unit run**, each forced by the API: the settle comes from the unit's record, which has PHD2's error text but not its numeric status, and stamps it on the unit's clock (`settled_unit_utc`); frames are written here, not on the unit's RAM disk; the unit cannot be claimed, so nothing stops another client using the focuser meanwhile; an abort is detected, not delivered.
 
+## The app
+
+The three runs above, interactive: one full-screen terminal app (Textual) that keeps the session's settings, shows the unit and the flux camera live, and starts, watches and stops runs from menus. It works in a console on the unit's desktop (NoMachine) and over ssh.
+
+```
+python -m flux_orchestrator.app --unit mast03 --flux-meter http://mast-ns-spec:8003
+```
+
+- **Main page**: the session (unit, flux-meter URL, target, output root; `e` to edit), the unit's live status every 2 s (activities, covers, mirror, tracking and pointing, focuser, the last guide settle), the flux camera, the three runs (enter: set up and run) and tonight's runs on the share, whoever started them (`h` to refresh).
+- **Setting up a run**: a form of the run's parameters, prefilled with this session's values (`*` marks a value changed from the default; an empty field goes back to it). `ctrl+s` saves and starts; `esc` goes back without saving.
+- **The run page**: the phase, a progress bar (positions or cells; a max-flux walk has no known end), the last step, the products folder and the run's log. `s` (or `ctrl+c`) asks the run to stop, after a confirmation: it stops at its next check and ends as Ctrl+C would end it on the command line, cleanup included. A second `s` is a **hard stop**: it also sends `unit/abort`, for a run waiting inside a call that would not return; that stops guiding and tracking too. `esc` goes back to the main page once the run has ended.
+- **Session file**: `flux-orchestrator-session.json` in the working directory (`--session` to choose), saved on every change; it keeps only values changed from each run's defaults.
+- **One session per host**: a lock on `~/.flux-orchestrator.lock`; a second app refuses to start, whichever folder it is started from. Quitting (`q`, Ctrl+Q, the palette) is refused while a run is going.
+- **Not in the app**: unit actions (stop guiding, abort, find home, mirror moves). Use the unit's API directly.
+- **Over ssh, a dropped connection ends the app and its run without the run's cleanup** (Windows ends the session's processes, and there is no tmux to detach into): the unit is not aborted, the focuser not sent home, and `result.json` keeps its last rewrite. Start long runs from the unit's desktop.
+
 ## Development
 
 Built and tested on macOS; the Thorlabs SDK is not needed for the tests.
@@ -180,6 +196,9 @@ src/flux_orchestrator/
   __main__.py                    CLI
   save_spirals.py                the save-spirals run and its CLI: frameless session, expose per cell, pairing
   fiber_focus.py                 the fiber-focus run and its CLI: guide, settle, focuser sweep, flux frames
+  app.py                         the interactive app: main page, run forms, the run page, stop and hard stop
+  session.py                     the app's session: settings and each run's parameter overrides, in a JSON file
+  progress.py                    run events and the app's stop request
   run.py                         one run: acquire, mirror, spiral walk, correlation, products
   unit_client.py                 the unit's public HTTP API
   flux_client.py                 this service's contract
@@ -193,6 +212,9 @@ tests/
   test_orchestrator_run.py       whole runs against the fakes
   test_save_spirals.py           save-spirals runs, the clock offset and the pairing
   test_fiber_focus.py            fiber-focus runs: refusals, the settle, aborts, the focuser sent home
+  test_progress.py               run events, and a stop from the app in each run
+  test_session.py                the session's parameters and file
+  test_app.py                    the app under Textual's Pilot against the fakes
   test_orchestrator_rules.py     the stopping rule and the median
   test_orchestrator_photometry.py  detection, darkness and spikes
   test_service.py   endpoints in process against a stub camera
