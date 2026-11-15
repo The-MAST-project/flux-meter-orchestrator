@@ -17,6 +17,7 @@ is in `result.json` rather than in its header; and the imager's gain defaults to
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import json
 import logging
@@ -173,6 +174,8 @@ class FluxFrameRecord:
     requested_utc: str
     received_utc: str
     saturated_pixels: int
+    #: Kept, as the flux frame paired with an imager frame; an unpaired one is deleted.
+    kept: bool = False
 
 
 @dataclass
@@ -395,7 +398,8 @@ class SpiralsRun:
         deadline = time.monotonic() + p.number_of_frames * (p.step_seconds + FRAME_OVERHEAD_S)
         while True:
             check(self._stop)
-            name = frame_name("flux", ring, within, len(flux))
+            # Provisional: the frame paired with an imager frame is renamed after it, the rest deleted.
+            name = f"capture-{ring}-{within:03d}-{len(flux):02d}.fits"
             frame = self.meter.expose()
             self._write_flux_frame(name, frame, cell)
             flux.append(frame)
@@ -424,6 +428,7 @@ class SpiralsRun:
         cell.clock_offset = ClockOffset.bracketed(_parse_utc(exposure["started"]), sent, answered)
         cell.pairs = self._pairs(exposure, cell.clock_offset, flux, cell.flux_frames)
         self._collect_imager_frames(cell, ring, within)
+        self._keep_paired_flux_frames(cell, ring, within)
         logger.info(
             f"step {index}: cell={moved.cell} ring={moved.ring}: {exposure['completed']} of {p.number_of_frames} "
             f"imager frames, {len(flux)} flux frames"
@@ -448,6 +453,29 @@ class SpiralsRun:
             shared.rmdir()
         except OSError:
             logger.warning(f"left '{shared}' in place: it is not empty")
+
+    def _keep_paired_flux_frames(self, cell: Cell, ring: int, within: int) -> None:
+        """One flux frame per imager frame, as the in-unit run took them: the one each imager frame
+        is paired with is renamed `flux-<ring>-<step>-<frame>.fits`, with its imager frame's index,
+        and the flux frames taken around them are deleted. A flux frame paired with two imager
+        frames is copied for the second."""
+        records = {r.name: r for r in cell.flux_frames}
+        for n, pair in enumerate(cell.pairs):
+            if pair.flux_frame is None:
+                continue
+            target = frame_name("flux", ring, within, n)
+            record = records[pair.flux_frame]
+            source = self.folder / record.name
+            if record.kept:
+                shutil.copy2(source, self.folder / target)
+                cell.flux_frames.append(dataclasses.replace(record, name=target))
+            else:
+                source.rename(self.folder / target)
+                record.name, record.kept = target, True
+            pair.flux_frame = target
+        for record in cell.flux_frames:
+            if not record.kept:
+                (self.folder / record.name).unlink()
 
     def _own_exposure(self, subfolder: str) -> dict[str, Any]:
         """The unit's record of the series this cell started, refused if it is another's or the

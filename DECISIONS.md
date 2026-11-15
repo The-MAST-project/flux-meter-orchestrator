@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-15] One flux frame per imager frame
+
+**Why.** The flux frames are taken back to back for the length of each imager series (the 2026-10-29 entry), so a 4 s step kept two or three. Param's in-unit run kept one per imager frame, and his analysis expects `flux-…-FF` beside each `step-…-FF`.
+
+**What.** After each cell, the flux frame paired with each imager frame (the largest overlap) is renamed `flux-<ring>-<step>-<frame>.fits` with the imager frame's index; the rest are deleted, and `result.json` marks which were kept. A flux frame paired with two imager frames is copied for the second.
+
+**Implications.** The pairing still decides which frame is kept, so the overlap is recorded; frames taken outside every imager window are not kept.
+
 ## [2026-11-15] After an abort, the mirror goes back to SKY
 
 **Why.** Found by Param on mast03, 2026-11-15: a stop during a run's acquisition aborted the unit while the folding mirror was moving, which stopped it at 235250, between SKY and SPEC. The unit counts as operational only with the mirror at a preset, so every later run was refused until the mirror was moved by hand. The fake unit did not model a mid-move stop, so neither the tests nor the hands-on review met it.
