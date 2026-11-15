@@ -122,6 +122,7 @@ async def test_a_run_set_up_from_the_menu_is_watched_to_its_end_and_lands_in_his
         app.open_run(Kind.FIBER_FOCUS)
         await pilot.pause()
         await pilot.press("ctrl+s")
+        await pilot.press("y")
         await until(pilot, lambda: isinstance(app.screen, RunScreen) and app.screen.finished, "the run to end")
 
         assert "completed" in str(app.screen.query_one("#run-phase").render())
@@ -158,6 +159,7 @@ async def test_stop_ends_the_run_as_ctrl_c_would_and_quitting_waits_for_it(tmp_p
         app.open_run(Kind.FIBER_FOCUS)
         await pilot.pause()
         await pilot.press("ctrl+s")
+        await pilot.press("y")
         await until(pilot, gate.entered.is_set, "the run to be inside its first exposure")
 
         app.action_quit_app()
@@ -185,6 +187,7 @@ async def test_a_second_stop_is_a_hard_stop_that_aborts_the_unit(tmp_path: Path)
         app.open_run(Kind.FIBER_FOCUS)
         await pilot.pause()
         await pilot.press("ctrl+s")
+        await pilot.press("y")
         await until(pilot, gate.entered.is_set, "the run to be inside its first exposure")
 
         for _ in range(2):
@@ -208,6 +211,7 @@ async def test_esc_on_a_running_run_page_stays(tmp_path: Path):
         app.open_run(Kind.FIBER_FOCUS)
         await pilot.pause()
         await pilot.press("ctrl+s")
+        await pilot.press("y")
         await until(pilot, gate.entered.is_set, "the run to be inside its first exposure")
         await pilot.press("escape")
         assert isinstance(app.screen, RunScreen)
@@ -237,3 +241,131 @@ async def test_a_status_read_that_fails_unexpectedly_is_shown_not_fatal(tmp_path
         await until(pilot, lambda: "not reachable" in str(main.query_one("#unit-panel").render()), "the failure shown")
         await pilot.pause(0.2)
         assert app.is_running
+
+
+# ------------------------------------------------------------- Avery's crashes --
+
+
+@in_loop
+async def test_brackets_typed_into_the_session_are_shown_not_parsed(tmp_path: Path):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.edit_session()
+        await pilot.pause()
+        app.screen.query_one("#field-object").value = "[/green] [b"  # type: ignore[attr-defined]
+        app.screen.query_one("#field-ra").value = ""  # type: ignore[attr-defined]
+        app.screen.query_one("#field-dec").value = ""  # type: ignore[attr-defined]
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.3)
+        assert app.is_running
+        assert "[/green] [b" in str(app.main.query_one("#session-panel").render())  # type: ignore[union-attr]
+
+
+@in_loop
+async def test_an_out_of_range_sweep_keeps_the_form_open_with_the_reason(tmp_path: Path):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.last_status is not None, "a status read")
+        app.open_run(Kind.FIBER_FOCUS)
+        await pilot.pause()
+        app.screen.query_one("#field-start").value = "-1"  # type: ignore[attr-defined]
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app.is_running and app.active is None
+        error = str(app.screen.query_one("#form-error").render())
+        assert "range" in error
+        assert app.session.overrides[Kind.FIBER_FOCUS]["start"] == 21000
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "why"),
+    [("flux_seconds", "nan", "finite"), ("count", "1", "two positions"), ("step", "abc", "whole number")],
+)
+@in_loop
+async def test_a_value_a_run_cannot_take_is_named_and_nothing_is_kept(tmp_path: Path, field: str, value: str, why: str):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.open_run(Kind.FIBER_FOCUS)
+        await pilot.pause()
+        app.screen.query_one(f"#field-{field}").value = value  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        assert why in str(app.screen.query_one("#form-error").render())
+        assert app.session.overrides[Kind.FIBER_FOCUS].get(field) != value
+
+
+@pytest.mark.parametrize(("ra", "dec", "why"), [("99", "-999", "RA"), ("1", "-999", "Dec"), ("nan", "1", "RA")])
+@in_loop
+async def test_an_impossible_target_is_refused_in_the_session_form(tmp_path: Path, ra: str, dec: str, why: str):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.edit_session()
+        await pilot.pause()
+        app.screen.query_one("#field-ra").value = ra  # type: ignore[attr-defined]
+        app.screen.query_one("#field-dec").value = dec  # type: ignore[attr-defined]
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert why in str(app.screen.query_one("#form-error").render())
+        assert app.session.ra_j2000_hours == 1.0
+
+
+@in_loop
+async def test_the_start_is_confirmed_with_the_sweep_spelled_out(tmp_path: Path):
+    app, sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.last_status is not None, "a status read")
+        app.open_run(Kind.FIBER_FOCUS)
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        question = str(app.screen.query_one("Static").render())
+        assert "Focuser 21000 to 21100" in question and "Guiding is left running" in question
+        await pilot.press("n")
+        await pilot.pause()
+        assert app.active is None and sky.focuser_moves == []
+
+
+@in_loop
+async def test_quitting_while_the_unit_still_guides_asks_first(tmp_path: Path):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        guiding = Sky(share_root=tmp_path / "guiding", activities=["Guiding"])
+        app.services.status = lambda _s: UnitClient(
+            UNIT, client=httpx.Client(transport=httpx.MockTransport(guiding.unit_handler))
+        )
+        await until(pilot, lambda: "Guiding" in ((app.last_status or {}).get("activities_verbal") or []), "guiding read")
+        await pilot.press("q")
+        await pilot.pause()
+        assert app.is_running and "still guiding" in str(app.screen.query_one("Static").render())
+        await pilot.press("y")
+        await pilot.pause()
+        assert not app.is_running
+
+
+@in_loop
+async def test_a_finished_fiber_focus_says_guiding_is_still_running(tmp_path: Path):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.open_run(Kind.FIBER_FOCUS)
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.press("y")
+        await until(pilot, lambda: isinstance(app.screen, RunScreen) and app.screen.finished, "the run to end")
+        assert "guiding is still running" in str(app.screen.query_one("#run-phase").render())
+
+
+def test_a_history_refresh_before_the_columns_exist_adds_them(tmp_path: Path):
+    from flux_orchestrator.app import HISTORY_COLUMNS, HistoryRow, MainScreen
+
+    async def body() -> None:
+        app, _sky = make_app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            main = app.main
+            assert isinstance(main, MainScreen)
+            table = main.query_one("#history")
+            table.clear(columns=True)  # type: ignore[attr-defined]
+            main.show_history([HistoryRow("Fiber focus", str(tmp_path / "a/b/0001"), "2026-11-15T20:00:00", "completed")])
+            assert len(table.columns) == len(HISTORY_COLUMNS)  # type: ignore[attr-defined]
+
+    asyncio.run(body())

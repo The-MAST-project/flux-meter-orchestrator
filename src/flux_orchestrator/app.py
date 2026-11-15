@@ -15,17 +15,21 @@ processes when the connection drops: start long runs from the unit's desktop (No
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime
 import json
 import logging
+import math
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -48,7 +52,9 @@ logger = logging.getLogger(__name__)
 
 #: One per host, wherever the app is started from and whichever session file it uses.
 LOCK_PATH = Path.home() / ".flux-orchestrator.lock"
+HISTORY_COLUMNS = ("Run", "Started UTC", "Ended as", "Folder")
 STATUS_POLL_S = 2.0
+POLL_CHECK_S = 0.1
 RUN_FOLDERS: dict[Kind, str] = {
     Kind.SAVE_SPIRALS: save_spirals.RUN_FOLDER,
     Kind.FIBER_FOCUS: fiber_focus.RUN_FOLDER,
@@ -129,20 +135,85 @@ class Services:
         )
 
 
-def validate(kind: Kind, params: Any) -> str | None:
-    """What the app refuses before a run starts; the runs' own checks still apply after it."""
+def validate(kind: Kind, params: Any, focuser: dict[str, Any] | None = None) -> str | None:
+    """What the app refuses before a run starts; the runs' own checks still apply after it.
+    `focuser` is the unit's last-read focuser status, for the sweep's limits."""
     for name in POSITIVE:
         value = getattr(params, name, None)
-        if value is not None and value <= 0:
-            return f"{name} must be positive"
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            return f"{label_of(name)} must be a positive number"
     if kind is Kind.SAVE_SPIRALS and not 0 <= params.rings <= save_spirals.MAX_RINGS:
-        return f"rings must be 0..{save_spirals.MAX_RINGS}"
+        return f"rings must be 0 to {save_spirals.MAX_RINGS}"
     if kind is Kind.FIBER_FOCUS:
-        if not 1 <= params.count <= fiber_focus.MAX_POSITIONS:
-            return f"count must be 1..{fiber_focus.MAX_POSITIONS}"
-        if params.count > 1 and params.step == 0:
-            return "a step of 0 would expose the same position again and again"
+        if not 2 <= params.count <= fiber_focus.MAX_POSITIONS:
+            return f"count must be 2 to {fiber_focus.MAX_POSITIONS}: a sweep needs at least two positions"
+        if params.step == 0:
+            return "step must not be 0: every position would be the same"
+        start = params.start if params.start is not None else (focuser or {}).get("known_as_good_position")
+        lower, upper = (focuser or {}).get("lower_limit"), (focuser or {}).get("upper_limit")
+        if start is not None:
+            end = start + params.step * (params.count - 1)
+            low, high = min(start, end), max(start, end)
+            if (lower is not None and low < lower) or (upper and high >= upper):
+                return f"the sweep {start} to {end} leaves the focuser's range {lower} to {upper}"
     return None
+
+
+#: What a parameter is, in words, with its units; the form's labels.
+LABELS: dict[str, str] = {
+    "start": "first focuser position (steps; empty: the unit's known-good position)",
+    "step": "focuser step between positions (steps; negative sweeps inward)",
+    "count": "number of focuser positions",
+    "frames_per_position": "flux frames at each position",
+    "settle_seconds": "wait after each focuser move (s)",
+    "guide_settle_timeout_seconds": "longest wait for guiding to settle (s)",
+    "acquisition_seconds": "acquisition exposure (s)",
+    "flux_seconds": "flux camera exposure (s)",
+    "step_seconds": "imager exposure at each cell (s)",
+    "seconds": "imager and flux exposure (s)",
+    "gain": "imager gain (empty: the unit's)",
+    "flux_gain": "flux camera gain",
+    "flux_black_level": "flux camera black level",
+    "x_step_arcsec": "RA step (arcsec on the sky)",
+    "y_step_arcsec": "Dec step (arcsec on the sky)",
+    "rings": "spiral rings to walk",
+    "number_of_frames": "frames at each cell",
+    "max_rings": "most rings to walk",
+    "patience_rings": "rings past the best before stopping",
+    "max_radius_arcsec": "largest radius (arcsec)",
+    "usable_fraction": "usable fraction of frames",
+    "center": "fiber position on the imager (x y; empty: the unit's)",
+    "skip_acquisition": "skip the acquisition (engineering only: true/false)",
+}
+
+
+def label_of(name: str) -> str:
+    return LABELS.get(name, name.replace("_", " "))
+
+
+def summary(kind: Kind, params: Any, session: Session, focuser: dict[str, Any] | None) -> str:
+    """The run in one paragraph, for the confirmation before it starts."""
+    target = (
+        f"RA {session.ra_j2000_hours} h, Dec {session.dec_j2000_degs}°"
+        if session.ra_j2000_hours is not None
+        else (session.object_name or "where the telescope points")
+    )
+    lines = [f"{TITLES[kind]} on {session.unit}, target {target}."]
+    if kind is Kind.FIBER_FOCUS:
+        start = params.start if params.start is not None else (focuser or {}).get("known_as_good_position")
+        home = (focuser or {}).get("known_as_good_position")
+        if start is not None:
+            end = start + params.step * (params.count - 1)
+            lines.append(f"Focuser {start} to {end}, {params.count} positions {abs(params.step)} apart (known-good {home}).")
+        lines.append(f"{params.frames_per_position} flux frame(s) of {params.flux_seconds:g} s at each position.")
+        lines.append("Guiding is left running at the end.")
+    else:
+        changed = [f.name for f in session.fields(kind) if f.changed]
+        if changed:
+            lines.append(
+                "Changed from the defaults: " + ", ".join(f"{label_of(n)} = {_shown(getattr(params, n))}" for n in changed)
+            )
+    return "\n".join(lines)
 
 
 def describe_unit(status: dict[str, Any]) -> str:
@@ -206,19 +277,22 @@ class LogLine(Message):
 
 
 class UnitStatus(Message):
-    def __init__(self, text: str, ok: bool) -> None:
+    def __init__(self, text: str, ok: bool, status: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.text = text
         self.ok = ok
+        self.status = status
 
 
 class RunFinished(Message):
-    def __init__(self, kind: Kind, folder: str | None, terminal: str, error: str | None) -> None:
+    def __init__(self, kind: Kind, folder: str | None, terminal: str, error: str | None, guiding_left: bool) -> None:
         super().__init__()
         self.kind = kind
         self.folder = folder
         self.terminal = terminal
         self.error = error
+        #: The run started guiding and nothing stopped it: a fiber-focus run that got that far.
+        self.guiding_left = guiding_left
 
 
 class AppLogHandler(logging.Handler):
@@ -227,7 +301,9 @@ class AppLogHandler(logging.Handler):
     def __init__(self, app: App) -> None:
         super().__init__(logging.INFO)
         self.app = app
-        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
+        formatter = logging.Formatter("%(asctime)sZ %(levelname)s %(message)s", "%H:%M:%S")
+        formatter.converter = time.gmtime
+        self.setFormatter(formatter)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -240,7 +316,11 @@ class AppLogHandler(logging.Handler):
 
 
 class Confirm(ModalScreen[bool]):
-    BINDINGS = [Binding("escape", "dismiss(False)", "No"), Binding("y", "dismiss(True)", "Yes")]
+    BINDINGS = [
+        Binding("escape", "dismiss(False)", "No"),
+        Binding("n", "dismiss(False)", "No"),
+        Binding("y", "dismiss(True)", "Yes"),
+    ]
 
     def __init__(self, question: str) -> None:
         super().__init__()
@@ -248,10 +328,13 @@ class Confirm(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm"):
-            yield Label(self.question)
+            yield Static(Text(self.question))
             with Horizontal():
                 yield Button("Yes [y]", id="yes", variant="error")
-                yield Button("No [esc]", id="no")
+                yield Button("No [n]", id="no")
+
+    def on_mount(self) -> None:
+        self.query_one("#no", Button).focus()
 
     @on(Button.Pressed)
     def pressed(self, event: Button.Pressed) -> None:
@@ -267,31 +350,53 @@ class FormField:
 
 
 class Form(Screen[dict[str, str] | None]):
-    """One input per field; Ctrl+S saves, Esc goes back without saving."""
+    """One input per field. Enter or Ctrl+S saves, if `check` passes; a value it refuses keeps the
+    form open with the reason under it. Esc goes back without saving."""
 
     BINDINGS = [Binding("ctrl+s", "save", "Save"), Binding("escape", "cancel", "Back")]
 
-    def __init__(self, title: str, fields: list[FormField], note: str = "") -> None:
+    def __init__(
+        self,
+        title: str,
+        fields: list[FormField],
+        note: str = "",
+        check: Callable[[dict[str, str]], str | None] | None = None,
+    ) -> None:
         super().__init__()
         self.form_title = title
         self.fields = fields
         self.note = note
+        self.check = check
 
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll():
-            yield Static(f"[b]{self.form_title}[/b]  {self.note}")
-            for f in self.fields:
-                yield Label(f.label)
-                yield Input(value=f.value, placeholder=f.placeholder, id=f"field-{f.name}")
+            yield Static(Text.assemble((self.form_title, "bold"), "  ", self.note))
             yield Static("", id="form-error")
+            for f in self.fields:
+                yield Label(Text(f.label))
+                yield Input(value=f.value, placeholder=f.placeholder, id=f"field-{f.name}")
         yield Footer()
 
+    def on_mount(self) -> None:
+        inputs = self.query(Input)
+        if inputs:
+            inputs.first().focus()
+
     def show_error(self, message: str) -> None:
-        self.query_one("#form-error", Static).update(f"[red]{message}[/red]")
+        self.query_one("#form-error", Static).update(Text(f"Not saved: {message}", style="bold red"))
+
+    @on(Input.Submitted)
+    def submitted(self) -> None:
+        self.action_save()
 
     def action_save(self) -> None:
-        self.dismiss({f.name: self.query_one(f"#field-{f.name}", Input).value for f in self.fields})
+        values = {f.name: self.query_one(f"#field-{f.name}", Input).value for f in self.fields}
+        why = self.check(values) if self.check is not None else None
+        if why is not None:
+            self.show_error(why)
+            return
+        self.dismiss(values)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -303,6 +408,7 @@ class RunScreen(Screen):
     BINDINGS = [
         Binding("s", "stop", "Stop"),
         Binding("ctrl+c", "stop", "Stop", priority=True),
+        Binding("q", "quit", "Quit", show=False),
         Binding("escape", "back", "Back to main"),
     ]
 
@@ -310,10 +416,12 @@ class RunScreen(Screen):
         super().__init__()
         self.kind = kind
         self.finished = False
+        self.phase = "starting"
+        self.started = time.monotonic()
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(f"[b]{TITLES[self.kind]}[/b]", id="run-title")
+        yield Static(Text(TITLES[self.kind], style="bold"), id="run-title")
         yield Static("starting", id="run-phase")
         yield ProgressBar(id="run-progress", show_eta=False)
         yield Static("", id="run-last")
@@ -321,35 +429,63 @@ class RunScreen(Screen):
         yield RichLog(id="run-log", wrap=True, max_lines=2000)
         yield Footer()
 
+    def on_mount(self) -> None:
+        self.set_interval(1.0, self._tick)
+
+    def _set(self, selector: str, content: Text | str) -> None:
+        """Update a widget if the page still has it: an event can land as the page closes."""
+        for widget in self.query(selector).results(Static):
+            widget.update(content)
+
+    def _tick(self) -> None:
+        if not self.finished:
+            elapsed = int(time.monotonic() - self.started)
+            self._set(
+                "#run-phase",
+                Text.assemble("phase: ", (self.phase, "bold"), f"   {elapsed // 60}:{elapsed % 60:02d} elapsed"),
+            )
+
     def show_event(self, event: RunEvent) -> None:
-        self.query_one("#run-folder", Static).update(f"products: {event.folder}")
+        self._set("#run-folder", Text(f"products: {event.folder}"))
         if event.kind is EventKind.PHASE:
-            self.query_one("#run-phase", Static).update(f"phase: [b]{event.phase}[/b]")
+            self.phase = event.phase or ""
+            self._tick()
+            for log in self.query("#run-log").results(RichLog):
+                log.write(Text(f"--- {event.phase}", style="bold"))
         elif event.kind is EventKind.STEP:
             if event.done is not None:
-                bar = self.query_one("#run-progress", ProgressBar)
-                bar.update(total=event.total, progress=event.done)
-            self.query_one("#run-last", Static).update(event.message)
+                for bar in self.query("#run-progress").results(ProgressBar):
+                    bar.update(total=event.total, progress=event.done)
+            self._set("#run-last", Text(event.message))
         elif event.kind is EventKind.FRAME:
-            self.query_one("#run-last", Static).update(f"frame {event.done}/{event.total}: {event.message}")
-        self.query_one("#run-log", RichLog).write(f"[{event.kind}] {event.message}")
+            self._set("#run-last", Text(f"frame {event.done}/{event.total}: {event.message}"))
 
     def show_end(self, finished: RunFinished) -> None:
         self.finished = True
-        colour = "green" if finished.terminal in ("completed", "converged") else "yellow"
-        text = f"ended: [{colour}][b]{finished.terminal}[/b][/{colour}]"
+        good = finished.terminal in ("completed", "converged")
+        text = Text.assemble("ended: ", (finished.terminal, "bold green" if good else "bold yellow"))
         if finished.error:
-            text += f"  {finished.error}"
-        self.query_one("#run-phase", Static).update(text + "   [dim]esc: back to main[/dim]")
+            text.append(f"  {finished.error}")
+        if finished.guiding_left:
+            text.append(
+                "\nguiding is still running on the unit; stop it through the unit's API "
+                "(stop_acquisition_and_guiding) before the next run",
+                style="yellow",
+            )
+        text.append("\nesc: back to main", style="dim")
+        self._set("#run-phase", text)
 
     def action_stop(self) -> None:
         self.app.request_stop()  # type: ignore[attr-defined]
+
+    def action_quit(self) -> None:
+        self.app.action_quit_app()  # type: ignore[attr-defined]
 
     def action_back(self) -> None:
         if self.finished:
             self.app.pop_screen()
         else:
-            self.notify("The run is still going: [s] to stop it first.", severity="warning")
+            self.notify("The run is still going: s or Ctrl+C to stop it first.", severity="warning", markup=False)
 
 
 class MainScreen(Screen):
@@ -376,7 +512,11 @@ class MainScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one("#history", DataTable)
-        table.add_columns("Run", "Started", "Ended as", "Folder")
+        if not table.columns:
+            table.add_columns(*HISTORY_COLUMNS)
+        runs = self.query_one("#runs", OptionList)
+        last = self.app.session.last_run  # type: ignore[attr-defined]
+        runs.highlighted = [k.value for k in Kind].index(last) if last in [k.value for k in Kind] else 0
         self.refresh_session()
 
     def refresh_session(self) -> None:
@@ -387,17 +527,24 @@ class MainScreen(Screen):
             else (s.object_name or "where the telescope points")
         )
         ready = s.why_not_ready()
-        self.query_one("#session-panel", Static).update(
-            f"[b]Session[/b]  (e: edit)\nunit         {s.unit or '—'}:{s.unit_port}\nflux meter   {s.flux_meter or '—'}\n"
-            f"target       {target}\noutput root  {s.output_root}\n"
-            + (f"[red]not ready: {ready}[/red]" if ready else "[green]ready[/green]")
+        panel = Text.assemble(
+            ("Session", "bold"),
+            "  (e: edit)\n",
+            f"unit         {s.unit or '—'}  port {s.unit_port}\nflux meter   {s.flux_meter or '—'}\n",
+            f"target       {target}\noutput root  {s.output_root}\n",
+            (f"not ready: {ready}", "red") if ready else ("ready", "green"),
         )
+        for widget in self.query("#session-panel").results(Static):
+            widget.update(panel)
 
     def show_history(self, rows: list[HistoryRow]) -> None:
         table = self.query_one("#history", DataTable)
+        if not table.columns:
+            # A refresh can land before on_mount has added them.
+            table.add_columns(*HISTORY_COLUMNS)
         table.clear()
         for row in rows:
-            table.add_row(row.kind, row.started[11:19], row.terminal, row.folder)
+            table.add_row(row.kind, row.started[11:19], row.terminal, "/".join(Path(row.folder).parts[-3:]))
 
     def action_edit_session(self) -> None:
         self.app.edit_session()  # type: ignore[attr-defined]
@@ -452,6 +599,10 @@ class OrchestratorApp(App):
         self.run_screen: RunScreen | None = None
         self.main: MainScreen | None = None
         self._log_handler: AppLogHandler | None = None
+        #: The last status the panel read, for the focuser's limits and whether the unit is guiding.
+        self.last_status: dict[str, Any] | None = None
+        #: Set as the app closes, so the poller's wait ends at once rather than after a poll.
+        self._poll_stop = threading.Event()
 
     def on_mount(self) -> None:
         self.main = MainScreen()
@@ -464,6 +615,7 @@ class OrchestratorApp(App):
         self.refresh_history()
 
     def on_unmount(self) -> None:
+        self._poll_stop.set()
         if self._log_handler is not None:
             logging.getLogger("flux_orchestrator").removeHandler(self._log_handler)
 
@@ -474,7 +626,7 @@ class OrchestratorApp(App):
         fields = [
             FormField("unit", "unit host", s.unit, "mast03"),
             FormField("unit_port", "unit port", str(s.unit_port)),
-            FormField("flux_meter", "flux-meter URL", s.flux_meter, "http://mast-ns-spec:8003"),
+            FormField("flux_meter", "flux-meter URL (e.g. http://mast-ns-spec:8003)", s.flux_meter, "not set"),
             FormField("output_root", "output root", s.output_root),
             FormField(
                 "ra", "RA J2000, decimal hours (empty: none)", "" if s.ra_j2000_hours is None else str(s.ra_j2000_hours)
@@ -482,25 +634,47 @@ class OrchestratorApp(App):
             FormField("dec", "Dec J2000, decimal degrees", "" if s.dec_j2000_degs is None else str(s.dec_j2000_degs)),
             FormField("object", "or an object name the unit resolves", s.object_name or ""),
         ]
-        self.push_screen(Form("Session", fields), self._session_edited)
+        self.push_screen(
+            Form("Session", fields, "enter or ctrl+s: save · esc: back", check=lambda v: _why(self._session_values(v))),
+            self._session_edited,
+        )
+
+    def _session_values(self, values: dict[str, str]) -> Session | str:
+        """The session these form values make, or why they cannot be taken."""
+        try:
+            unit = values["unit"].strip()
+            if any(c in unit for c in ":/ "):
+                return f"unit host '{unit}' should be a bare name like mast03; the port has its own field"
+            port = int(values["unit_port"])
+            if not 1 <= port <= 65535:
+                return f"unit port {port} is not 1 to 65535"
+            ra = float(values["ra"]) if values["ra"].strip() else None
+            dec = float(values["dec"]) if values["dec"].strip() else None
+        except ValueError as ex:
+            return f"not a number: {ex}"
+        if ra is not None and not (math.isfinite(ra) and 0 <= ra < 24):
+            return f"RA {ra} is not 0 to 24 hours"
+        if dec is not None and not (math.isfinite(dec) and -90 <= dec <= 90):
+            return f"Dec {dec} is not -90 to +90 degrees"
+        if (ra is None) != (dec is None):
+            return "RA and Dec go together"
+        flux = values["flux_meter"].strip()
+        if flux and not flux.startswith(("http://", "https://")):
+            return f"flux-meter URL '{flux}' should start with http://"
+        candidate = copy.deepcopy(self.session)
+        candidate.unit, candidate.unit_port, candidate.flux_meter = unit, port, flux
+        candidate.output_root = values["output_root"].strip() or self.session.output_root
+        candidate.ra_j2000_hours, candidate.dec_j2000_degs = ra, dec
+        candidate.object_name = values["object"].strip() or None
+        return candidate
 
     def _session_edited(self, values: dict[str, str] | None) -> None:
         if values is None:
             return
-        try:
-            s = self.session
-            s.unit = values["unit"].strip()
-            if any(c in s.unit for c in ":/ "):
-                raise ValueError(f"'{s.unit}' is not a bare host name; the port has its own field")
-            s.unit_port = int(values["unit_port"])
-            s.flux_meter = values["flux_meter"].strip()
-            s.output_root = values["output_root"].strip()
-            s.ra_j2000_hours = float(values["ra"]) if values["ra"].strip() else None
-            s.dec_j2000_degs = float(values["dec"]) if values["dec"].strip() else None
-            s.object_name = values["object"].strip() or None
-        except ValueError as ex:
-            self.notify(f"not saved: {ex}", severity="error")
+        made = self._session_values(values)
+        if isinstance(made, str):
             return
+        self.session.__dict__.update(made.__dict__)
         self.session.save(self.session_path)
         if self.main is not None:
             self.main.refresh_session()
@@ -510,35 +684,49 @@ class OrchestratorApp(App):
 
     def open_run(self, kind: Kind) -> None:
         if self.active is not None:
-            self.notify("A run is going.", severity="warning")
+            self.notify("A run is going.", severity="warning", markup=False)
             return
         fields = [
             FormField(
                 f.name,
-                f"{f.name} ({f.type_name}){'  *' if f.changed else ''}",
+                label_of(f.name) + ("  (changed)" if f.changed else ""),
                 "" if f.value is None else _shown(f.value),
                 f"default {f.default}",
             )
             for f in self.session.fields(kind)
         ]
-        note = "ctrl+s: save and run · esc: back"
-        self.push_screen(Form(f"{TITLES[kind]}: parameters", fields, note), lambda values: self._run_edited(kind, values))
+        note = "enter or ctrl+s: check and start · esc: back"
+        self.push_screen(
+            Form(f"{TITLES[kind]}: parameters", fields, note, check=lambda v: self._run_values(kind, v)),
+            lambda values: self._run_edited(kind, values),
+        )
+
+    def _focuser(self) -> dict[str, Any] | None:
+        return (self.last_status or {}).get("focuser")
+
+    def _run_values(self, kind: Kind, values: dict[str, str]) -> str | None:
+        """Why these values cannot start a run, or None; checked on a copy, so nothing is kept."""
+        candidate = copy.deepcopy(self.session)
+        try:
+            for name, text in values.items():
+                candidate.set_param(kind, name, text)
+        except SessionError as ex:
+            return str(ex)
+        return candidate.why_not_ready() or validate(kind, candidate.params(kind), self._focuser())
 
     def _run_edited(self, kind: Kind, values: dict[str, str] | None) -> None:
         if values is None:
             return
-        try:
-            for name, text in values.items():
-                self.session.set_param(kind, name, text)
-        except SessionError as ex:
-            self.notify(f"not saved: {ex}", severity="error")
-            return
+        for name, text in values.items():
+            self.session.set_param(kind, name, text)
+        self.session.last_run = kind.value
         self.session.save(self.session_path)
-        why = self.session.why_not_ready() or validate(kind, self.session.params(kind))
-        if why is not None:
-            self.notify(f"not started: {why}", severity="error")
-            return
-        self.start_run(kind)
+        text = summary(kind, self.session.params(kind), self.session, self._focuser())
+        self.push_screen(Confirm(text + "\n\nStart it?"), lambda yes: self._start_confirmed(kind, yes))
+
+    def _start_confirmed(self, kind: Kind, yes: bool | None) -> None:
+        if yes:
+            self.start_run(kind)
 
     def start_run(self, kind: Kind) -> None:
         self.active = Active(kind, StopToken())
@@ -569,7 +757,14 @@ class OrchestratorApp(App):
                 terminal = str(run.record.terminal)
             error = f"{type(ex).__name__}: {ex}"
             logger.exception("the run failed")
-        self.post_message(RunFinished(kind, folder, terminal, error))
+        record = run.record if run is not None else None
+        # The run started guiding and nothing on its side stopped it: a fiber-focus run that got that far.
+        guiding_left = (
+            getattr(record, "guide_settle", None) is not None
+            and getattr(record, "stopped_by", None) != "the app (hard stop)"
+            and not getattr(record, "unit_aborted", False)
+        )
+        self.post_message(RunFinished(kind, folder, terminal, error, guiding_left))
 
     def on_run_event_posted(self, message: RunEventPosted) -> None:
         if self.active is not None:
@@ -579,7 +774,8 @@ class OrchestratorApp(App):
 
     def on_log_line(self, message: LogLine) -> None:
         if self.run_screen is not None and self.active is not None:
-            self.run_screen.query_one("#run-log", RichLog).write(message.line)
+            for log in self.run_screen.query("#run-log").results(RichLog):
+                log.write(Text(message.line))
 
     def on_run_finished(self, message: RunFinished) -> None:
         self.active = None
@@ -593,16 +789,27 @@ class OrchestratorApp(App):
         if active is None:
             return
         if active.stop.kind is None:
-            self.push_screen(Confirm("Stop the run? It ends as Ctrl+C would end it."), self._stop_confirmed)
+            self.push_screen(
+                Confirm(
+                    "Stop the run? It stops at its next step and cleans up: a fiber-focus run sends the "
+                    "focuser back to its known-good position and leaves guiding running; a spiral is "
+                    "closed. Safe for the telescope."
+                ),
+                self._stop_confirmed,
+            )
         else:
             self.push_screen(
-                Confirm("Hard stop: send unit/abort now? This also stops guiding and tracking."), self._hard_stop_confirmed
+                Confirm(
+                    "Hard stop: send unit/abort now? For a run that does not stop by itself. It stops "
+                    "everything on the unit, guiding and tracking included."
+                ),
+                self._hard_stop_confirmed,
             )
 
     def _stop_confirmed(self, yes: bool | None) -> None:
         if yes and self.active is not None:
             self.active.stop.request(StopKind.STOP)
-            self.notify("Stopping at the next check. [s] again for a hard stop.")
+            self.notify("Stopping at the next step. Press s again for a hard stop.", markup=False)
 
     def _hard_stop_confirmed(self, yes: bool | None) -> None:
         if yes and self.active is not None:
@@ -625,16 +832,23 @@ class OrchestratorApp(App):
             if self.session.unit:
                 try:
                     status = self.services.status(self.session).status()
-                    self.post_message(UnitStatus(describe_unit(status), ok=True))
+                    self.post_message(UnitStatus(describe_unit(status), ok=True, status=status))
                 except Exception as ex:  # noqa: BLE001 -- shown on the panel; a poller that raised would end the app, run and all
                     self.post_message(UnitStatus(f"not reachable: {type(ex).__name__}: {ex}", ok=False))
-            time.sleep(self.poll_s)
+            # In short waits that watch the worker's cancellation, which the app sets as it shuts
+            # down: one long sleep would hold the exit for a whole poll.
+            deadline = time.monotonic() + self.poll_s
+            while time.monotonic() < deadline:
+                if worker.is_cancelled or self._poll_stop.wait(POLL_CHECK_S):
+                    return
 
     def on_unit_status(self, message: UnitStatus) -> None:
-        title = f"[b]Unit {self.session.unit}[/b]" + ("" if message.ok else "  [red]![/red]")
-        self._update_panel("#unit-panel", f"{title}\n{message.text}")
+        if message.status is not None:
+            self.last_status = message.status
+        title = Text.assemble((f"Unit {self.session.unit}", "bold"), ("" if message.ok else "  not reachable", "red"))
+        self._update_panel("#unit-panel", Text.assemble(title, "\n", message.text))
 
-    def _update_panel(self, selector: str, text: str) -> None:
+    def _update_panel(self, selector: str, text: Text) -> None:
         """A panel, once the main page has composed it; a read that lands before is shown by the next."""
         if self.main is not None:
             for panel in self.main.query(selector).results(Static):
@@ -647,12 +861,14 @@ class OrchestratorApp(App):
             return
         try:
             info = self.services.meter(self.session).info()
-            text = f"[b]Flux camera[/b]\n{info.model}  sn {info.serial_number}  full scale {info.saturation_level}"
+            text = Text.assemble(
+                ("Flux camera", "bold"), f"\n{info.model}  sn {info.serial_number}  full scale {info.saturation_level}"
+            )
         except Exception as ex:  # noqa: BLE001 -- shown on the panel, whatever the service did
-            text = f"[b]Flux camera[/b]  [red]not reachable[/red]\n{ex}"
+            text = Text.assemble(("Flux camera", "bold"), ("  not reachable", "red"), f"\n{ex}")
         self.call_from_thread(self._show_camera, text)
 
-    def _show_camera(self, text: str) -> None:
+    def _show_camera(self, text: Text) -> None:
         self._update_panel("#camera-panel", text)
 
     @work(thread=True, group="history", exclusive=True)
@@ -666,13 +882,29 @@ class OrchestratorApp(App):
 
     def action_quit_app(self) -> None:
         if self.active is not None:
-            self.notify("A run is going: stop it first ([s] on its page).", severity="warning")
+            self.notify("A run is going: stop it first (s on its page).", severity="warning", markup=False)
+            return
+        if "Guiding" in ((self.last_status or {}).get("activities_verbal") or []):
+            self.push_screen(
+                Confirm(
+                    "The unit is still guiding. Quitting leaves it guiding; stop it through the unit's API. Quit anyway?"
+                ),
+                self._quit_confirmed,
+            )
             return
         self.exit()
+
+    def _quit_confirmed(self, yes: bool | None) -> None:
+        if yes:
+            self.exit()
 
     async def action_quit(self) -> None:
         """Textual's own quit, which Ctrl+Q and the command palette reach: refused mid-run too."""
         self.action_quit_app()
+
+
+def _why(made: Session | str) -> str | None:
+    return made if isinstance(made, str) else None
 
 
 def _shown(value: Any) -> str:

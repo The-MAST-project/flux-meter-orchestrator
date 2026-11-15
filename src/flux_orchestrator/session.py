@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import types
 import typing
 from dataclasses import dataclass, field
@@ -45,6 +46,9 @@ TITLES: dict[Kind, str] = {
 }
 
 
+_NAMES = {int: "whole number", float: "number", str: "text"}
+
+
 class SessionError(ValueError):
     """A value the session cannot take."""
 
@@ -73,6 +77,8 @@ class Session:
     object_name: str | None = None
     #: Per kind, the parameters changed from the run's defaults.
     overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The run set up last, which the main page offers first.
+    last_run: str | None = None
 
     @property
     def target(self) -> Target:
@@ -165,9 +171,12 @@ def parse(annotation: Any, text: str) -> Any:
         return _parse_ints(text, len(typing.get_args(annotation)))
     if annotation in (int, float, str):
         try:
-            return annotation(text)
+            value = annotation(text)
         except ValueError as ex:
-            raise SessionError(f"'{text}' is not a {annotation.__name__}") from ex
+            raise SessionError(f"'{text}' is not a {_NAMES.get(annotation, annotation.__name__)}") from ex
+        if isinstance(value, float) and not math.isfinite(value):
+            raise SessionError(f"'{text}' is not a finite number")
+        return value
     raise SessionError(f"cannot edit a {annotation}")
 
 
