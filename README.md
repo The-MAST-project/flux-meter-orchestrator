@@ -2,6 +2,13 @@
 
 Two packages for MAST's flux metering, in [`The-MAST-project/flux-meter-orchestrator`](https://github.com/The-MAST-project/flux-meter-orchestrator): `flux_meter_service`, the HTTP service that holds the flux camera, and `flux_orchestrator`, which runs flux metering against one unit through its public API (below).
 
+**Not the permanent home of either.** Both halves are stopgaps with planned homes in the organization:
+
+- the flux camera's service moves into the spectrograph service on mast-ns-spec: [MAST_spec#129 Placeholder: serve the Thorlabs flux camera from the spec service's standard API, not a separate service](https://github.com/The-MAST-project/MAST_spec/issues/129);
+- the orchestrator's runs move into MAST-control: [MAST_control#52 Placeholder: run flux metering from MAST-control instead of a standalone orchestrator script](https://github.com/The-MAST-project/MAST_control/issues/52).
+
+Until those land, this repository is where both are run from, fixed and changed.
+
 The service is a small HTTP service that serves the Thorlabs Zelux (CS165MU) flux camera to the MAST telescope units over the site network. It runs on `mast-ns-spec`, where the camera is attached by USB; the units reach it with `RemoteFluxMeter` (MAST_unit `src/flux_metering/remote.py`), which is the other half of this contract.
 
 The service opens the camera when it starts and holds it until it stops. There is no open, close, claim or token on the wire: one flux-metering run at a time is an operating rule, and the service only serializes individual camera calls with a lock.
@@ -128,7 +135,7 @@ Param's fixed-ring run (`acquire_and_save_spirals` in the unit's flux-metering b
 
 1. Acquisition (`--acquisition-seconds`) and the folding mirror, as above.
 2. The unit opens a spiral session that takes no frames (`spiral_new_path`, `frames=false`), confirmed by `status.latest.spiral.frames`.
-3. At each cell, `expose` takes `--frames` imager frames (`--step-seconds`, full frame, bin 1) into a subfolder of its own, `save-spirals-<night>-<NNNN>-<ring>-<step>`. From the moment `expose` answers, flux frames (`--flux-seconds`) are taken back to back until `status.latest.exposure` says the series has ended. `spiral_next_step` then moves to the next cell. The walk ends when PWI4 reports a cell beyond the last ring, or after the last cell. A failed imager frame is recorded and the walk goes on; a series that saved no frame at all, or whose frames will not reach the share (the unit's share demoted, known from the first read), fails the run.
+3. At each cell, `expose` takes `--frames` imager frames (`--step-seconds`, full frame, bin 1) into a subfolder of its own, `FluxMetering-<night>-<NNNN>-<ring>-<step>`. From the moment `expose` answers, flux frames (`--flux-seconds`) are taken back to back until `status.latest.exposure` says the series has ended. `spiral_next_step` then moves to the next cell. The walk ends when PWI4 reports a cell beyond the last ring, or after the last cell. A failed imager frame is recorded and the walk goes on; a series that saved no frame at all, or whose frames will not reach the share (the unit's share demoted, known from the first read), fails the run.
 4. `spiral_end_path` closes the session, leaving tracking as it was found.
 
 **Pairing.** Each imager frame's window is its `DATE-OBS` and exposure from `status.latest.exposure.frames`, in the unit's clock. The clock offset is measured at every cell: the unit stamps the record's `started` between receiving `expose` and answering it, so the offset lies within that round trip. The imager window, moved onto this host's clock, is paired with the flux frame that overlaps it most. A flux frame's window is the whole request, transfer included. An imager frame whose `DATE-OBS` predates the request is flagged (`predates_request`): PHD2, guiding, handed back the guide frame it already had.
@@ -139,7 +146,7 @@ Param's fixed-ring run (`acquire_and_save_spirals` in the unit's flux-metering b
 python -m flux_orchestrator.save_spirals --unit mast01 --flux-meter http://localhost:8003 --ra 20.68 --dec 43.55 --rings 2 --frames 3
 ```
 
-**Products.** `<output-root>/<observing night>/save-spirals/NNNN/`: the flux frames as `flux-<ring>-<step>-<n>.fits`, each header naming its cell, ring and the imager subfolder (`IMGDIR`), and `result.json`, rewritten after every cell, with the parameters and, per cell, the unit's exposure record, the share folder of its imager frames, the clock offset and the pairs. The imager frames stay where the unit files them, under the night's `Exposures` folder on the share.
+**Products.** `<output-root>/<observing night>/FluxMetering/NNNN/` (the in-unit run's folder name): the flux frames as `flux-<ring>-<step>-<n>.fits`, each header naming its cell, ring and the imager subfolder (`IMGDIR`), and `result.json`, rewritten after every cell, with the parameters and, per cell, the unit's exposure record, the share folder of its imager frames, the clock offset and the pairs. The imager frames stay where the unit files them, under the night's `Exposures` folder on the share.
 
 **Ctrl+C or a failure** after the unit was first asked anything aborts it (`unit/abort`), which ends a series in flight and closes the session; `spiral_end_path` would refuse while one is in flight. A `spiral_end_path` that fails is a failure too. `unit/abort` answers before it has stopped anything, so the run then reads the unit's status until `latest.spiral` and `latest.exposure` have ended, for up to 30 s, and records whether they did (`unit_abort_confirmed`). The exit status is 0 only for a completed walk whose session closed.
 
@@ -162,6 +169,23 @@ python -m flux_orchestrator.fiber_focus --unit mast03 --flux-meter http://mast-n
 **Stopping.** An operator's `unit/abort` is seen as `Aborting` in the unit's activities or tracking turned off, checked from the guide start on: in every wait, before each frame and after the last position. It ends the run as `aborted`, the frames already taken kept; the focuser is sent home once the abort has finished. **Ctrl+C** aborts the unit only while it acquires or moves the mirror; later it leaves guiding running. A refused acquisition request leaves nothing in flight and is not aborted, nor is an acquisition the unit reports failed or a mirror move that does not arrive; an acquisition this side gave up waiting on is. A failure mid-sweep (the flux meter, a focuser that does not arrive in 120 s) sends the focuser home and leaves the unit otherwise alone. A status read whose records failed is waited out until the settle timeout, whose message carries the unit's errors. The exit status is 0 only for a completed sweep.
 
 **Differences from the in-unit run**, each forced by the API: the settle comes from the unit's record, which has PHD2's error text but not its numeric status, and stamps it on the unit's clock (`settled_unit_utc`); frames are written here, not on the unit's RAM disk; the unit cannot be claimed, so nothing stops another client using the focuser meanwhile; an abort is detected, not delivered.
+
+## The app
+
+The three runs above, interactive: one full-screen terminal app (Textual) that keeps the session's settings, shows the unit and the flux camera live, and starts, watches and stops runs from menus. It works in a console on the unit's desktop (NoMachine) and over ssh.
+
+```
+python -m flux_orchestrator.app --unit mast03 --flux-meter http://mast-ns-spec:8003
+```
+
+- **Main page**: the session (unit, flux-meter URL, target, output root; `e` to edit), the unit's live status every 2 s (activities, covers, mirror, tracking and pointing, focuser, the last guide settle), the flux camera, the three runs (enter: set up and run) and tonight's runs on the share, whoever started them (`h` to refresh).
+- **Setting up a run**: a form of the run's parameters, prefilled with this session's values (`*` marks a value changed from the default; an empty field goes back to it). `ctrl+s` saves and starts; `esc` goes back without saving.
+- **The run page**: the phase, a progress bar (positions or cells; a max-flux walk has no known end), the last step, the products folder and the run's log. `s` (or `ctrl+c`) asks the run to stop, after a confirmation: it stops at its next check and ends as Ctrl+C would end it on the command line, cleanup included. A second `s` is a **hard stop**: it also sends `unit/abort`, for a run waiting inside a call that would not return; that stops guiding and tracking too. `esc` goes back to the main page once the run has ended.
+- **Session file**: `flux-orchestrator-session.json` in the working directory (`--session` to choose), saved on every change; it keeps only values changed from each run's defaults.
+- **One session per host**: a lock on `~/.flux-orchestrator.lock`; a second app refuses to start, whichever folder it is started from. Quitting (`q`, Ctrl+Q, the palette) is refused while a run is going.
+- **Stop guiding** (`g` on the main page): shown only while the unit guides and no run is going, as after a fiber-focus run, which leaves guiding on. Confirmed first; calls `stop_acquisition_and_guiding`.
+- **Not in the app**: other unit actions (abort, find home, mirror moves). Use the unit's API directly.
+- **Over ssh, a dropped connection ends the app and its run without the run's cleanup** (Windows ends the session's processes, and there is no tmux to detach into): the unit is not aborted, the focuser not sent home, and `result.json` keeps its last rewrite. Start long runs from the unit's desktop.
 
 ## Development
 
@@ -189,6 +213,9 @@ src/flux_orchestrator/
   __main__.py                    CLI
   save_spirals.py                the save-spirals run and its CLI: frameless session, expose per cell, pairing
   fiber_focus.py                 the fiber-focus run and its CLI: guide, settle, focuser sweep, flux frames
+  app.py                         the interactive app: main page, run forms, the run page, stop and hard stop
+  session.py                     the app's session: settings and each run's parameter overrides, in a JSON file
+  progress.py                    run events and the app's stop request
   run.py                         one run: acquire, mirror, spiral walk, correlation, products
   unit_client.py                 the unit's public HTTP API
   flux_client.py                 this service's contract
@@ -202,6 +229,9 @@ tests/
   test_orchestrator_run.py       whole runs against the fakes
   test_save_spirals.py           save-spirals runs, the clock offset and the pairing
   test_fiber_focus.py            fiber-focus runs: refusals, the settle, aborts, the focuser sent home
+  test_progress.py               run events, and a stop from the app in each run
+  test_session.py                the session's parameters and file
+  test_app.py                    the app under Textual's Pilot against the fakes
   test_orchestrator_rules.py     the stopping rule and the median
   test_orchestrator_photometry.py  detection, darkness and spikes
   test_service.py   endpoints in process against a stub camera

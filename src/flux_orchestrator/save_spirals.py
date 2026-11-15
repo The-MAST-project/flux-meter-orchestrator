@@ -23,7 +23,7 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -34,12 +34,14 @@ from astropy.io import fits
 from flux_meter_service.models import Settings
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
 from flux_orchestrator.photometry import saturated_pixels
+from flux_orchestrator.progress import EventKind, Reporter, RunEvent, StopToken, check, close, stopped_by
 from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, RA_STEP_COMMANDED, flux_frame_header, make_run_folder
 from flux_orchestrator.unit_client import UNIT_PORT, SpiralStep, Target, UnitApiError, UnitClient
 
 logger = logging.getLogger(__name__)
 
-RUN_FOLDER = "save-spirals"
+#: The in-unit run's folder name, which Param's analysis reads (Param, 2026-11-15).
+RUN_FOLDER = "FluxMetering"
 RESULT_FILE = "result.json"
 #: The ring is one digit of the flux frames' names.
 MAX_RINGS = 9
@@ -204,6 +206,8 @@ class SpiralsRecord:
     unit_abort_error: str | None = None
     #: The unit's records said the session and the series had ended; None when the abort failed.
     unit_abort_confirmed: bool | None = None
+    #: The app's stop that ended the run: one a check raised, or a hard stop.
+    stopped_by: str | None = None
     cells: list[Cell] = field(default_factory=list)
 
 
@@ -222,6 +226,8 @@ class SpiralsRun:
         unit: UnitClient,
         meter: FluxMeterClient,
         output_root: Path = DEFAULT_OUTPUT_ROOT,
+        stop: StopToken | None = None,
+        on_event: Callable[[RunEvent], None] | None = None,
     ) -> None:
         self.params = params
         self.unit = unit
@@ -236,6 +242,8 @@ class SpiralsRun:
         self._subfolder_prefix = f"{RUN_FOLDER}-{self.folder.parent.parent.name}-{self.folder.name}"
         #: The unit has been asked to do something for this run and not yet released.
         self._engaged = False
+        self._stop = stop
+        self.report = Reporter(str(self.folder), on_event)
 
     def run(self) -> SpiralsRecord:
         """The whole run. Always writes `result.json`; re-raises what ended a failed run.
@@ -245,7 +253,11 @@ class SpiralsRun:
         `spiral_end_path` refuses, and `unit/abort` ends both."""
         try:
             try:
-                self.record.terminal = self._run()
+                try:
+                    self.record.terminal = self._run()
+                finally:
+                    # Before any cleanup below: a stop pressed during it must not cut it short.
+                    close(self._stop)
             except KeyboardInterrupt:
                 self.record.terminal = SpiralsTerminal.ABORTED
                 self._abort_unit()
@@ -255,8 +267,14 @@ class SpiralsRun:
                 self._abort_unit()
                 raise
         finally:
+            self.record.stopped_by = stopped_by(self._stop)
             self.record.ended_at = _now().isoformat()
             self._write_record()
+            self.report.emit(
+                EventKind.END,
+                str(self.record.terminal),
+                detail={"terminal": self.record.terminal, "error": self.record.error},
+            )
         return self.record
 
     def _run(self) -> SpiralsTerminal:
@@ -268,8 +286,10 @@ class SpiralsRun:
             logger.warning("acquisition SKIPPED: this run is a shakedown, not centered on the fiber")
         else:
             logger.info(f"{p.unit}: acquiring")
+            self.report.enter("acquiring")
             self.unit.acquire(p.target, seconds=p.acquisition_seconds, gain=p.gain)
         # After the acquisition: it takes the mirror out to solve and puts it back.
+        self.report.enter("mirror")
         self.unit.put_mirror_in()
 
         self.record.session = self.unit.spiral_new_frameless_path(p.x_step_arcsec, p.y_step_arcsec)
@@ -284,7 +304,9 @@ class SpiralsRun:
                 "be confirmed square on the sky (MAST_unit#136)"
             )
 
+        self.report.enter("walking")
         terminal = self._walk()
+        self.report.enter("closing")
         self._end_session()
         return terminal
 
@@ -298,10 +320,24 @@ class SpiralsRun:
         while True:
             if moved.ring is not None and moved.ring > p.rings:
                 return SpiralsTerminal.COMPLETED
-            self.record.cells.append(self._expose_cell(index, moved))
+            cell = self._expose_cell(index, moved)
+            self.record.cells.append(cell)
             self._write_record()
+            self.report.emit(
+                EventKind.STEP,
+                f"cell {index + 1}/{p.total_cells}: {cell.cell} ring {cell.ring}, {len(cell.flux_frames)} flux frames",
+                done=index + 1,
+                total=p.total_cells,
+                detail={
+                    "cell": cell.cell,
+                    "ring": cell.ring,
+                    "flux_frames": len(cell.flux_frames),
+                    "imager": cell.subfolder,
+                },
+            )
             if index + 1 >= p.total_cells:
                 return SpiralsTerminal.COMPLETED
+            check(self._stop)
             moved = self.unit.spiral_next_step()
             if moved.cell is None:
                 logger.warning(f"step {index + 1}: no cell from the unit ({moved.error})")
@@ -328,6 +364,7 @@ class SpiralsRun:
         flux: list[FluxFrame] = []
         deadline = time.monotonic() + p.number_of_frames * (p.step_seconds + FRAME_OVERHEAD_S)
         while True:
+            check(self._stop)
             name = f"flux-{ring}-{within:03d}-{len(flux):03d}.fits"
             frame = self.meter.expose()
             self._write_flux_frame(name, frame, cell)

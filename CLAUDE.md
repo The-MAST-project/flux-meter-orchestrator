@@ -1,10 +1,10 @@
 # flux-meter-orchestrator
 
-HTTP service that holds the Thorlabs Zelux flux camera on `mast-ns-spec` and serves it to MAST units, and `flux_orchestrator`, which runs flux metering from mast-ns-spec against one unit: the max-flux run, and Param's save-spirals and fiber-focus runs. See `README.md` and `DECISIONS.md`.
+HTTP service that holds the Thorlabs Zelux flux camera on `mast-ns-spec` and serves it to MAST units, and `flux_orchestrator`, which runs flux metering from mast-ns-spec against one unit: the max-flux run, and Param's save-spirals and fiber-focus runs. `flux_orchestrator.app` is an interactive Textual app over the three. See `README.md` and `DECISIONS.md`.
 
 ## Commands
 
-- Tests: `.venv/bin/python -m pytest`
+- Tests: `.venv/bin/python -m pytest` (the app's run headless under Textual's Pilot; no async plugin, see `tests/test_app.py`)
 - Lint and format: `.venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
 - Types: `npx pyright`
 - Dependencies are managed with uv (`uv.lock`); the venv is `.venv/`, Python 3.12.
@@ -30,4 +30,5 @@ The other half is `RemoteFluxMeter` in MAST_unit `src/flux_metering/remote.py`. 
 - The camera opens at startup and a failure exits the process; do not add reconnects, claims or open/close endpoints.
 - The frame-poll slack (`thorcam.POLL_SLACK_MS`) must stay below the client's `EXPOSE_SLACK_S` (10 s).
 - The Thorlabs SDK is not on PyPI and is not a declared dependency.
+- Planned homes, both placeholders: the service into MAST_spec (The-MAST-project/MAST_spec#129), the orchestrator into MAST_control (The-MAST-project/MAST_control#52). Keep this repository's contracts close to what those will need; a change that makes the move harder goes on the ticket first.
 - Hosted at `The-MAST-project/flux-meter-orchestrator` (public) since 2026-11-15, full history; `elibrody-weizmann/flux-meter` is superseded. Push there. The Python package and distribution names (`flux_meter_service`, `flux_orchestrator`, `flux-meter-service`) did not change with the repository's name.

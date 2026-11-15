@@ -1,5 +1,29 @@
 # Decisions
 
+## [2026-11-15] Save-spirals products under FluxMetering/
+
+**Why.** Param, who runs and analyzes these, asked for the in-unit run's folder name, so his analysis finds the orchestrator's runs where it found the in-unit ones.
+
+**What.** `save_spirals.RUN_FOLDER` is `FluxMetering` (was `save-spirals`); the imager subfolders on the unit are `FluxMetering-<night>-<NNNN>-<ring>-<step>`. The folder is a product path read by people and scripts, so this is an interface change, made at the user's request.
+
+**Implications.** Tonight's first run, `2026-11-15/save-spirals/0001`, stays where it is.
+
+## [2026-11-15] The app can stop guiding
+
+**Why.** A fiber-focus run leaves guiding running, as the in-unit run did, and the next run is refused until it stops; with no way to stop it in the app, an operator was stuck (the hands-on review of 2026-11-15).
+
+**What.** One unit action besides the runs: `g` on the main page, offered only while the unit reports `Guiding` and no run is going, confirmed, calling `stop_acquisition_and_guiding`. **Refines** the entry below, which kept unit actions out of the app.
+
+**Implications.** Other unit actions stay in the unit's API.
+
+## [2026-11-15] An interactive app over the runs
+
+**Why.** Param runs the orchestrator by hand on mast03. Three command lines with a dozen flags each, products found by path and Ctrl+C as the only stop are workable for a developer and slow for an operator.
+
+**What.** `python -m flux_orchestrator.app`, on Textual (approved 2026-11-15), over the three runs unchanged. A run gets two optional hooks. `on_event` receives immutable `RunEvent` snapshots at phase changes, steps and frames, through a `Reporter` that swallows a watcher's failure, so the display cannot change how a run ends. A per-run `StopToken`, checked in every unit-client wait and between frames and steps, raises `StopRequested` once: a `KeyboardInterrupt`, so each run's existing Ctrl+C handling applies unchanged. A run closes its token as it leaves its work, before any cleanup, so neither that stop nor one pressed later cuts the cleanup (focuser home, abort confirmed) short; `stopped_by` names a stop only when one actually ended the run (raised, or a hard stop). The command line keeps plain Ctrl+C. A second stop is a hard stop that also sends `unit/abort`, recorded as `stopped_by` in the run's record; it is the app's only call that acts on the unit. The status panel reads the unit through a client of its own; the camera's `/info` is read once and after each run, since it waits behind an exposure. One session per host, by an OS file lock on `~/.flux-orchestrator.lock` that dies with the process. Ctrl+Q and the command palette's Quit are refused mid-run like `q`: a closed app would leave its run going with no screen and no stop. Session settings in JSON, overrides only.
+
+**Implications.** Over ssh a dropped connection ends the app and its run without cleanup (accepted 2026-11-15; long runs from the unit's desktop). A stop lands only at the next check: inside one long call (a spiral step, an exposure, a max-flux measurement wait) it waits for that call, which is what the hard stop is for.
+
 ## [2026-11-15] Public, as the org's other repositories are
 
 **Why.** Units clone the orchestrator to install it (README), and a private repository would need credentials on every unit; MAST\_unit, MAST\_common and MAST\_provisioning are public.

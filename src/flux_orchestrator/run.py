@@ -32,6 +32,7 @@ from flux_orchestrator.correlate import measure_pair
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
 from flux_orchestrator.frame_shift import MIN_CONFIDENCE
 from flux_orchestrator.photometry import FluxMeasurement, PositionSource, measure_frame, saturated_pixels
+from flux_orchestrator.progress import EventKind, Reporter, RunEvent, StopToken, check, close, stopped_by
 from flux_orchestrator.spiral import RingRule, Terminal, radius_arcsec, representative_of
 from flux_orchestrator.unit_client import SpiralStep, Target, UnitApiError, UnitClient
 
@@ -173,6 +174,8 @@ class RunRecord:
     spiral: dict[str, Any] | None = None
     unit_end_path: dict[str, Any] | None = None
     unit_end_path_error: str | None = None
+    #: The app's stop that ended the run: one a check raised, or a hard stop.
+    stopped_by: str | None = None
     steps: list[Step] = field(default_factory=list)
     best_index: int | None = None
     result: Result | None = None
@@ -252,6 +255,8 @@ class Run:
         unit: UnitClient,
         meter: FluxMeterClient,
         output_root: Path = DEFAULT_OUTPUT_ROOT,
+        stop: StopToken | None = None,
+        on_event: Callable[[RunEvent], None] | None = None,
     ) -> None:
         self.params = params
         self.unit = unit
@@ -263,6 +268,8 @@ class Run:
             params=params, folder=str(self.folder), started_at=_iso_now(), camera=self.camera.model_dump()
         )
         self._stage = Stage.PREPARING
+        self._stop = stop
+        self.report = Reporter(str(self.folder), on_event)
         self._rule = RingRule(patience_rings=params.patience_rings, max_rings=params.max_rings)
         self._shared_folder: str | None = None
         self._last_aperture_position: tuple[float, float] | None = None
@@ -273,7 +280,11 @@ class Run:
         """The whole run. Always writes `result.json`; re-raises what ended a failed run."""
         try:
             try:
-                self.record.terminal = self._run()
+                try:
+                    self.record.terminal = self._run()
+                finally:
+                    # Before any cleanup below: a stop pressed during it must not cut it short.
+                    close(self._stop)
             except KeyboardInterrupt:
                 self.record.terminal = Terminal.ABORTED
                 if self._stage is Stage.PREPARING:
@@ -286,8 +297,14 @@ class Run:
                 if self._stage is Stage.SPIRAL:
                     self._end_session()
         finally:
+            self.record.stopped_by = stopped_by(self._stop)
             self.record.ended_at = _iso_now()
             self._write_record()
+            self.report.emit(
+                EventKind.END,
+                str(self.record.terminal),
+                detail={"terminal": self.record.terminal, "error": self.record.error},
+            )
         return self.record
 
     def _run(self) -> Terminal:
@@ -298,8 +315,10 @@ class Run:
             logger.warning("acquisition SKIPPED: this run is a shakedown, and its dx/dy is not a fiber measurement")
         else:
             logger.info(f"{p.unit}: acquiring")
+            self.report.enter("acquiring")
             self.unit.acquire(p.target, seconds=p.seconds, gain=p.gain)
         # After the acquisition: it takes the mirror out to solve and puts it back.
+        self.report.enter("mirror")
         self.unit.put_mirror_in()
 
         # Before the request: once it is sent, the unit may have opened a session, and closing one
@@ -322,8 +341,10 @@ class Run:
         self._dec_degrees = numeric_card(header, DEC_CARD)
         self._pixel_scale = numeric_card(header, PIXEL_SCALE_CARD)
 
+        self.report.enter("walking")
         terminal = self._walk(reference)
         self._end_session()
+        self.report.enter("measuring")
         self._measure(reference)
         return terminal
 
@@ -335,6 +356,13 @@ class Run:
         while True:
             step = self._measure_step(index, moved)
             self.record.steps.append(step)
+            shown = f"{step.flux:.0f}" if step.flux is not None else "unmeasurable"
+            self.report.emit(
+                EventKind.STEP,
+                f"step {index + 1}: cell {step.cell} ring {step.ring}, flux {shown}",
+                done=index + 1,
+                detail={"cell": step.cell, "ring": step.ring, "flux": step.flux, "imager": step.imager_frame},
+            )
             terminal = self._rule.update(index, step.flux, step.ring)
             self.record.best_index = self._rule.best_index
             if terminal is not None:
@@ -342,6 +370,7 @@ class Run:
             if step.cell is not None and (radius_arcsec(step.cell, p.x_step_arcsec, p.y_step_arcsec) > p.max_radius_arcsec):
                 return Terminal.MAX_RADIUS
 
+            check(self._stop)
             moved = self.unit.spiral_next_step(p.seconds)
             if moved.cell is None:
                 # A telemetry hiccup must not end a walk that may already hold its peak; the step
@@ -370,6 +399,7 @@ class Run:
         )
 
     def _flux_exposure(self, index: int, n: int, cell: tuple[int, int] | None, ring: int | None) -> FluxExposure:
+        check(self._stop)
         frame = self.meter.expose()
         name = f"flux-{index:05d}-{n:02d}.fits"
         self._write_flux_frame(name, frame, index, cell, ring)
