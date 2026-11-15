@@ -40,7 +40,8 @@ from flux_orchestrator.unit_client import UNIT_PORT, SpiralStep, Target, UnitApi
 
 logger = logging.getLogger(__name__)
 
-RUN_FOLDER = "save-spirals"
+#: The in-unit run's folder name, which Param's analysis reads (Param, 2026-11-15).
+RUN_FOLDER = "FluxMetering"
 RESULT_FILE = "result.json"
 #: The ring is one digit of the flux frames' names.
 MAX_RINGS = 9

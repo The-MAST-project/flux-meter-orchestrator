@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-15] Save-spirals products under FluxMetering/
+
+**Why.** Param, who runs and analyzes these, asked for the in-unit run's folder name, so his analysis finds the orchestrator's runs where it found the in-unit ones.
+
+**What.** `save_spirals.RUN_FOLDER` is `FluxMetering` (was `save-spirals`); the imager subfolders on the unit are `FluxMetering-<night>-<NNNN>-<ring>-<step>`. The folder is a product path read by people and scripts, so this is an interface change, made at the user's request.
+
+**Implications.** Tonight's first run, `2026-11-15/save-spirals/0001`, stays where it is.
+
 ## [2026-11-15] The app can stop guiding
 
 **Why.** A fiber-focus run leaves guiding running, as the in-unit run did, and the next run is refused until it stops; with no way to stop it in the app, an operator was stuck (the hands-on review of 2026-11-15).
