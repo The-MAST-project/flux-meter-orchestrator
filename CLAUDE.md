@@ -1,6 +1,6 @@
 # flux-meter
 
-HTTP service that holds the Thorlabs Zelux flux camera on `mast-ns-spec` and serves it to MAST units, and `flux_orchestrator`, which runs flux metering from mast-ns-spec against one unit. See `README.md` and `DECISIONS.md`.
+HTTP service that holds the Thorlabs Zelux flux camera on `mast-ns-spec` and serves it to MAST units, and `flux_orchestrator`, which runs flux metering from mast-ns-spec against one unit: the max-flux run, and Param's save-spirals and fiber-focus runs. See `README.md` and `DECISIONS.md`.
 
 ## Commands
 

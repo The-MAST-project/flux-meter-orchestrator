@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-15] The fiber-focus run, off the unit
+
+**Why.** Param's fiber-focus run exists only on MAST_unit `eli/flux-night`; moving mast03 back to `main` needs it here, as the save-spirals run already is.
+
+**What.** `fiber_focus.py` ports it through the public API. The settle is read from `status.latest.guiding` (MAST_unit#384) rather than PHD2's events; the focuser's `Moving` activity, the completion the position endpoints declare, is the arrival signal, so the unit's close-enough tolerance stays in one place. An operator's `unit/abort` cannot be delivered to a run off the unit, so it is detected: `Aborting` in the unit's activities or tracking off, checked from the guide start on, including while a focuser move is awaited, between frames and after the last position. Exits follow the in-unit run: only Ctrl+C during the acquisition or mirror move, or an acquisition this side gave up on once the unit had accepted it, aborts the unit, so a refused request never stops another client's work; every other ending sends the focuser home and leaves guiding running. The up-front refusals are the in-unit run's, read from status.
+
+**Implications.** A second run is refused while the first's guiding runs. Detecting an abort by tracking means a client that turns tracking off mid-sweep ends the run too. PHD2's numeric settle status is not recorded.
+
 ## [2026-11-15] `--local-frames` dropped
 
 **Why.** `--local-frames` (added 2026-11-11, for a unit whose share is demoted) rested on a wrong premise: while the share is demoted, the unit's mover still takes every frame off the RAM disk within about a second, to `C:/MAST/share-fallback/`, and spiral steps report `image: null`, so a read from `local_products_path` finds nothing. The fake unit did not model the mover, so the tests passed. The share is back, so the option is not needed.

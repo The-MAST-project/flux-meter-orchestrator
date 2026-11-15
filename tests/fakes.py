@@ -121,6 +121,43 @@ class Sky:
     steps: int = 0
     tracking: bool = False
     _cells: Iterator[tuple[int, int]] | None = None
+    # ------------------------------------------------- the focuser and guiding --
+    focuser_position: int = 20000
+    focuser_lower: int | None = 0
+    focuser_upper: int | None = 60000
+    known_as_good: int | None = 20000
+    #: Status reads a move shows `Moving` for; 0 when the focuser never leaves (already there).
+    move_reads: int = 1
+    #: The focuser never arrives.
+    focuser_stuck: bool = False
+    #: `goto_known_as_good_position` is refused.
+    home_refused: bool = False
+    focuser_moves: list[int] = field(default_factory=list)
+    _moving_reads: int = 0
+    _focuser_target: int | None = None
+    #: How the guide start goes: "settled", "failed" (PHD2 reports it), "never" (no settle at all)
+    #: or "ends" (the guiding thread refuses after the PUT answered).
+    settle: str = "settled"
+    #: Status reads before the settle (or the ending) shows.
+    settle_reads: int = 1
+    #: `start_guiding` refused in the response envelope.
+    guiding_refused: bool = False
+    guider_backend: str = "phd2"
+    guiding_record: dict[str, Any] | None = None
+    _settle_wait: int = 0
+    #: The unit's own activities, as `status.activities_verbal` lists them.
+    activities: list[str] = field(default_factory=list)
+    #: An operator's `unit/abort` lands as the focuser is sent to the move with this index (from 0).
+    operator_abort_at_move: int | None = None
+    #: An operator's `unit/abort` lands while the guide start settles.
+    operator_abort_while_settling: bool = False
+    #: Status reads `Aborting` stays raised after an abort.
+    aborting_reads: int = 1
+    _aborting: int = 0
+    #: `start_acquisition_and_guiding` is refused in the envelope.
+    acquisition_refused: bool = False
+    #: Status reads whose `latest` records failed: no `latest.guiding`, the reason in `errors`.
+    unreadable_records_reads: int = 0
 
     def commanded_px(self, cell: tuple[int, int]) -> tuple[float, float]:
         return cell[0] * self.x_step_arcsec / PIXEL_SCALE, cell[1] * self.y_step_arcsec / PIXEL_SCALE
@@ -153,6 +190,9 @@ class Sky:
             "spiral_end_path": self._spiral_end_path,
             "expose": self._expose,
             "abort": self._abort,
+            "start_guiding": self._start_guiding,
+            "focuser/position": self._focuser_position,
+            "focuser/goto_known_as_good_position": self._focuser_home,
         }
         if method not in endpoints:
             return httpx.Response(404)
@@ -160,6 +200,8 @@ class Sky:
 
     def _acquire(self, params: dict[str, str]) -> httpx.Response:
         assert params["handover_automatically_to_guider"] == "false"
+        if self.acquisition_refused:
+            return envelope(errors=["start_acquisition_and_guiding: already acquiring"])
         self.acquisition = {"state": "running", "errors": [], "started": "t", "ended": None, "succeeded": None}
         return envelope()
 
@@ -299,6 +341,86 @@ class Sky:
                 "errors": [failure] if failure else [],
             }
 
+    # ------------------------------------------------------------ guiding and focus --
+
+    def _start_guiding(self, _params: dict[str, str]) -> httpx.Response:
+        if "Guiding" in self.activities:
+            return envelope(errors=["endpoint_start_guiding: already guiding"])
+        if self.guiding_refused:
+            return envelope(errors=["endpoint_start_guiding: self.unit.mount is None"])
+        self.tracking = True
+        self.activities.append("Guiding")
+        self.guiding_record = {
+            "started": self.unit_now().isoformat(),
+            "ended": None,
+            "succeeded": None,
+            "errors": [],
+            "backend": self.guider_backend,
+            "settle": None,
+            "settled_at": None,
+            "settle_error": None,
+        }
+        self._settle_wait = self.settle_reads
+        return envelope()
+
+    def _advance_guiding(self) -> None:
+        record = self.guiding_record
+        if record is None or record["ended"] is not None or record["settle"] is not None:
+            return
+        if self.operator_abort_while_settling:
+            self.operator_abort()
+            return
+        if self._settle_wait > 0:
+            self._settle_wait -= 1
+            return
+        match self.settle:
+            case "settled":
+                record |= {"settle": "settled", "settled_at": self.unit_now().isoformat()}
+            case "failed":
+                record |= {"settle": "failed", "settled_at": self.unit_now().isoformat(), "settle_error": "Lost star"}
+            case "ends":
+                record |= {"ended": self.unit_now().isoformat(), "succeeded": False, "errors": ["PHD2: not connected"]}
+                self.activities.remove("Guiding")
+
+    def _focuser_position(self, params: dict[str, str]) -> httpx.Response:
+        target = int(params["position"])
+        if len(self.focuser_moves) == self.operator_abort_at_move:
+            self.operator_abort()
+        self.focuser_moves.append(target)
+        self._start_move(target)
+        return envelope()
+
+    def _focuser_home(self, _params: dict[str, str]) -> httpx.Response:
+        if self.home_refused or self.known_as_good is None:
+            return envelope(errors=["known_as_good_position is None"])
+        self._start_move(self.known_as_good)
+        return envelope()
+
+    def _start_move(self, target: int) -> None:
+        # As `goto_position`: no `Moving` at all when already there.
+        self._focuser_target = target
+        self._moving_reads = 0 if target == self.focuser_position else self.move_reads
+
+    def _arrive(self) -> None:
+        """A move whose `Moving` reads are spent has arrived, in the same read that shows it ended,
+        as the unit lowers `Moving` only on arrival."""
+        if self._focuser_target is not None and not self.focuser_stuck and self._moving_reads == 0:
+            self.focuser_position, self._focuser_target = self._focuser_target, None
+
+    def operator_abort(self) -> None:
+        """What `Unit.abort` does to guiding and the mount: guiding stopped (the record ends,
+        succeeded), tracking off, the focuser stopped where it is, and `Aborting` raised for a
+        while."""
+        if "Guiding" in self.activities:
+            self.activities.remove("Guiding")
+        if self.guiding_record is not None and self.guiding_record["ended"] is None:
+            self.guiding_record |= {"ended": self.unit_now().isoformat(), "succeeded": True}
+        self.tracking = False
+        # A stuck focuser stands for the unit's timer re-sending a move that stalled short.
+        if not self.focuser_stuck:
+            self._focuser_target = None
+        self._aborting = self.aborting_reads
+
     def _abort(self, _params: dict[str, str]) -> httpx.Response:
         if self.abort_lags:
             return envelope()
@@ -320,7 +442,39 @@ class Sky:
         self._advance_exposure()
         if not self.predates_latest_spiral:
             latest["spiral"] = self.spiral
-        status = {"latest": latest, "stage": {"at_preset": self.at_preset}}
+        unreadable = self.unreadable_records_reads > 0
+        if self.guiding_record is not None and not unreadable:
+            latest["guiding"] = dict(self.guiding_record)
+        self._arrive()
+        moving = self._focuser_target is not None
+        activities = [*self.activities, *(["Aborting"] if self._aborting > 0 else [])]
+        status = {
+            "latest": latest,
+            "stage": {"at_preset": self.at_preset},
+            "activities_verbal": activities or None,
+            "errors": ["latest: PWI4 did not answer"] if unreadable else [],
+            "mount": {
+                "tracking": self.tracking,
+                "ra_j2000_hours": 1.0,
+                "dec_j2000_degs": 60.0,
+                "ha_hours": -0.5,
+                "lmst_hours": 0.5,
+            },
+            "focuser": {
+                "activities_verbal": ["Moving"] if moving else None,
+                "position": self.focuser_position,
+                "lower_limit": self.focuser_lower,
+                "upper_limit": self.focuser_upper,
+                "known_as_good_position": self.known_as_good,
+            },
+        }
+        if self._aborting > 0:
+            self._aborting -= 1
+        if unreadable:
+            self.unreadable_records_reads -= 1
+        self._advance_guiding()
+        if self._moving_reads > 0:
+            self._moving_reads -= 1
         # Each read moves the slow things one poll along.
         if self.acquisition is not None and self.acquisition["state"] == "running":
             self.acquisition = {**self.acquisition, "state": self.acquisition_outcome}

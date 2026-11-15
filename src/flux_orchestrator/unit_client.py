@@ -29,10 +29,25 @@ ACQUISITION_TIMEOUT_S = 900.0
 #: A Sky->Spec traverse was measured at 21-22 s on mast02 (2026-09-02); a ceiling, not a tolerance.
 STAGE_TIMEOUT_S = 120.0
 SPEC_PRESET = "spec"
+#: One focuser move; a ceiling, not a tolerance: a sweep step takes seconds, the whole travel well under this.
+FOCUSER_TIMEOUT_S = 120.0
+#: `unit/abort` answers before anything has stopped; `Aborting` clears once it all has.
+ABORT_SETTLE_TIMEOUT_S = 60.0
+#: The activity names `status` reports in `activities_verbal`, MAST_common `activities.py`.
+MOVING = "Moving"
+ABORTING = "Aborting"
 
 
 class UnitApiError(RuntimeError):
     """The unit reported errors, could not be reached, or did not finish in time."""
+
+
+class AcquisitionFailedError(UnitApiError):
+    """The unit ended the acquisition without success, as against this side giving up on it."""
+
+
+class UnitInterruptedError(UnitApiError):
+    """Something else stopped the unit while this side waited on it: an operator's `unit/abort`."""
 
 
 class AcquisitionState(StrEnum):
@@ -79,11 +94,14 @@ class UnitClient:
         self._request("PUT", "abort", {})
 
     def acquire(self, target: Target, seconds: float, gain: int | None) -> None:
-        """Acquire onto the assumed fiber position and wait for the outcome; no guiding.
+        """Acquire onto the assumed fiber position and wait for the outcome; no guiding."""
+        self.start_acquisition(target, seconds, gain)
+        self.wait_for_acquisition()
 
-        The unit replaces `status.latest.acquisition` with a fresh `RUNNING` record before it
-        answers, so the first status read after this PUT already describes this acquisition.
-        """
+    def start_acquisition(self, target: Target, seconds: float, gain: int | None) -> None:
+        """Ask for the acquisition, with no handover to the guider. The unit replaces
+        `status.latest.acquisition` with a fresh `RUNNING` record before it answers, so the first
+        status read after this PUT already describes this acquisition."""
         self._request(
             "PUT",
             "start_acquisition_and_guiding",
@@ -98,6 +116,10 @@ class UnitClient:
                 "handover_automatically_to_guider": False,
             },
         )
+
+    def wait_for_acquisition(self) -> None:
+        """Wait for the acquisition `start_acquisition` began to end; a failed one raises
+        `AcquisitionFailedError`, a timeout a plain `UnitApiError`."""
         outcome = self._latest_acquisition(
             self._wait_for(
                 "the acquisition to finish",
@@ -108,7 +130,7 @@ class UnitClient:
         if outcome is None:
             raise UnitApiError(f"{self.name}: status reports no latest acquisition; the unit predates it")
         if outcome["state"] != AcquisitionState.ENDED:
-            raise UnitApiError(f"{self.name}: acquisition {outcome['state']}: {outcome.get('errors')}")
+            raise AcquisitionFailedError(f"{self.name}: acquisition {outcome['state']}: {outcome.get('errors')}")
 
     def put_mirror_in(self) -> None:
         """Move the folding mirror to SPEC and wait for it to be there. Waits on position, not on
@@ -196,6 +218,39 @@ class UnitClient:
             raise UnitApiError(f"{self.name}: status reports no latest exposure")
         return exposure
 
+    def start_guiding(self) -> None:
+        """`PUT start_guiding`. The unit begins a fresh `status.latest.guiding` record before it
+        answers, so the next status read describes this guide start; a refusal made later, on
+        the guiding thread, ends that record unsucceeded."""
+        self._request("PUT", "start_guiding", {})
+
+    def move_focuser(self, position: int, interrupted: Callable[[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
+        """Send the focuser to `position` and wait for the move to end. Returns the status read
+        that showed it ended."""
+        self._request("PUT", "focuser/position", {"position": position})
+        return self._wait_for_focuser(f"the focuser to reach {position}", interrupted)
+
+    def focuser_home(self) -> dict[str, Any]:
+        """Send the focuser to its `known_as_good_position` and wait for the move to end."""
+        self._request("PUT", "focuser/goto_known_as_good_position", {})
+        return self._wait_for_focuser("the focuser to reach known_as_good_position", None)
+
+    def wait_for_abort_done(self) -> None:
+        """Wait for the unit's `Aborting` to clear: everything the abort reaches has stopped."""
+        self._wait_for("the unit's abort to finish", ABORT_SETTLE_TIMEOUT_S, lambda status: not is_active(status, ABORTING))
+
+    def _wait_for_focuser(self, what: str, interrupted: Callable[[dict[str, Any]], bool] | None) -> dict[str, Any]:
+        """On the focuser's `Moving`, the completion the position endpoints declare: raised before
+        the PUT answers (not at all when already close enough) and lowered on arrival, so it
+        carries the unit's own close-enough tolerance."""
+
+        def arrived(status: dict[str, Any]) -> bool:
+            # A read whose focuser part failed says nothing; the next one may.
+            focuser = status.get("focuser")
+            return focuser is not None and not is_active(focuser, MOVING)
+
+        return self._wait_for(what, FOCUSER_TIMEOUT_S, arrived, interrupted)
+
     def wait_for_released(self, timeout_s: float) -> None:
         """Wait for `latest.spiral` and `latest.exposure` to say they have ended: `unit/abort`
         answers before it has stopped them."""
@@ -219,10 +274,18 @@ class UnitClient:
             raise UnitApiError("no stage in status: the component did not build")
         return stage.get("at_preset")
 
-    def _wait_for(self, what: str, timeout_s: float, done: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+    def _wait_for(
+        self,
+        what: str,
+        timeout_s: float,
+        done: Callable[[dict[str, Any]], bool],
+        interrupted: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_s
         while True:
             status = self.status()
+            if interrupted is not None and interrupted(status):
+                raise UnitInterruptedError(f"{self.name}: interrupted while waiting for {what}")
             if done(status):
                 return status
             if time.monotonic() > deadline:
@@ -244,3 +307,20 @@ class UnitClient:
         if body.get("errors"):
             raise UnitApiError(f"{verb} {url}: {body['errors']}")
         return body.get("value")
+
+
+def is_active(component: dict[str, Any], activity: str) -> bool:
+    """`activity` is among a status's `activities_verbal`, which is None when idle."""
+    return activity in (component.get("activities_verbal") or [])
+
+
+def focuser_of(status: dict[str, Any]) -> dict[str, Any]:
+    focuser = status.get("focuser")
+    if focuser is None:
+        raise UnitApiError(f"no focuser in this status read; the unit reports: {status.get('errors') or 'no errors'}")
+    return focuser
+
+
+def latest_guiding(status: dict[str, Any]) -> dict[str, Any] | None:
+    """`status.latest.guiding`, the latest guide start's record (MAST_unit#384)."""
+    return (status.get("latest") or {}).get("guiding")

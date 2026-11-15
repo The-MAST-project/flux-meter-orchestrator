@@ -120,6 +120,26 @@ python -m flux_orchestrator.save_spirals --unit mast01 --flux-meter http://local
 
 **Ctrl+C or a failure** after the unit was first asked anything aborts it (`unit/abort`), which ends a series in flight and closes the session; `spiral_end_path` would refuse while one is in flight. A `spiral_end_path` that fails is a failure too. `unit/abort` answers before it has stopped anything, so the run then reads the unit's status until `latest.spiral` and `latest.exposure` have ended, for up to 30 s, and records whether they did (`unit_abort_confirmed`). The exit status is 0 only for a completed walk whose session closed.
 
+## Fiber-focus run
+
+Param's focus sweep (`acquire_and_focus_fiber` in the unit's flux-metering branch), driven through the unit's public API. It measures nothing: it guides on a star with the folding mirror in, steps the focuser through `--count` positions from `--start` (default: the unit's `known_as_good_position`) by `--step` (signed), and saves flux frames at every position for analysis afterwards.
+
+1. **Refused up front**, before anything moves: the unit busy (`Acquiring`, `Guiding`, `Autofocusing`, `StartingUp`, `ShuttingDown`, `FluxMetering` in its activities), the focuser moving, a position outside the focuser's limits, a step of 0 over several positions, more than 999 positions.
+2. Acquisition (`--acquisition-seconds`, no handover) and the folding mirror, as above.
+3. `start_guiding`, then the settle in `status.latest.guiding` (MAST_unit#384). PHD2 reporting a failed settle, the guide start's record ending without one (the guider refused, PHD2 went away), a guider other than PHD2, or no settle within `--guide-settle-timeout` (120 s) end the run as `guiding_failed`. After the settle, guiding never steers the run.
+4. At each position: `focuser/position`, a wait for the focuser's `Moving` to clear, `--settle-seconds`, then one status read for the measured position and the mount's pointing, then `--frames` flux frames.
+5. The focuser goes to `known_as_good_position` on every way out once the unit was asked to do anything. **Guiding is left running**, as the in-unit run left it, so a second run is refused until guiding is stopped (`stop_acquisition_and_guiding`).
+
+```
+python -m flux_orchestrator.fiber_focus --unit mast03 --flux-meter http://mast-ns-spec:8003 --ra 1.967 --dec 28.52 --step 200 --count 11 --start 20500
+```
+
+**Products.** `<output-root>/<observing night>/FiberFocus/NNNN/`, the in-unit run's layout: `flux-<PPP>-<MMMMM>-<FF>.fits`, named by position index from 001, the **measured** focuser position and the frame within the position; headers carry `POSIDX`, `FRAMEIDX`, `FOCUSPOS`, `FOCUSCMD`, `FOCSETTL`, the mount's RA/Dec/HA/LMST and `OBJECT`. `result.json`, rewritten after every position, has the parameters, the commanded positions, the focuser limits, the guide settle, each position with its frames, and where the focuser was sent at the end.
+
+**Stopping.** An operator's `unit/abort` is seen as `Aborting` in the unit's activities or tracking turned off, checked from the guide start on: in every wait, before each frame and after the last position. It ends the run as `aborted`, the frames already taken kept; the focuser is sent home once the abort has finished. **Ctrl+C** aborts the unit only while it acquires or moves the mirror; later it leaves guiding running. A refused acquisition request leaves nothing in flight and is not aborted, nor is an acquisition the unit reports failed or a mirror move that does not arrive; an acquisition this side gave up waiting on is. A failure mid-sweep (the flux meter, a focuser that does not arrive in 120 s) sends the focuser home and leaves the unit otherwise alone. A status read whose records failed is waited out until the settle timeout, whose message carries the unit's errors. The exit status is 0 only for a completed sweep.
+
+**Differences from the in-unit run**, each forced by the API: the settle comes from the unit's record, which has PHD2's error text but not its numeric status, and stamps it on the unit's clock (`settled_unit_utc`); frames are written here, not on the unit's RAM disk; the unit cannot be claimed, so nothing stops another client using the focuser meanwhile; an abort is detected, not delivered.
+
 ## Development
 
 Built and tested on macOS; the Thorlabs SDK is not needed for the tests.
@@ -145,6 +165,7 @@ src/flux_meter_service/
 src/flux_orchestrator/
   __main__.py                    CLI
   save_spirals.py                the save-spirals run and its CLI: frameless session, expose per cell, pairing
+  fiber_focus.py                 the fiber-focus run and its CLI: guide, settle, focuser sweep, flux frames
   run.py                         one run: acquire, mirror, spiral walk, correlation, products
   unit_client.py                 the unit's public HTTP API
   flux_client.py                 this service's contract
@@ -157,6 +178,7 @@ tests/
   fakes.py                       a unit and the service faked at the HTTP layer, sharing one sky
   test_orchestrator_run.py       whole runs against the fakes
   test_save_spirals.py           save-spirals runs, the clock offset and the pairing
+  test_fiber_focus.py            fiber-focus runs: refusals, the settle, aborts, the focuser sent home
   test_orchestrator_rules.py     the stopping rule and the median
   test_orchestrator_photometry.py  detection, darkness and spikes
   test_service.py   endpoints in process against a stub camera
