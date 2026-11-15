@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-15] Moved to The-MAST-project as flux-meter-orchestrator
+
+**Why.** The orchestrator is being handed to Param to run flux metering on mast03, which needs a repository the team can reach, and MAST work belongs on The-MAST-project, not on personal forks.
+
+**What.** **Supersedes** the 2026-10-13 entry "Hosted on a personal GitHub repo". The full history is pushed to `The-MAST-project/flux-meter-orchestrator`, private; `elibrody-weizmann/flux-meter` is no longer pushed to. The repository is named for both halves; the packages keep their names.
+
+**Implications.** Units install the orchestrator from a clone of the new repository (README, *Install the orchestrator on a unit*). Making it public, as the org's other repositories are, is a separate decision.
+
 ## [2026-11-15] The fiber-focus run, off the unit
 
 **Why.** Param's fiber-focus run exists only on MAST_unit `eli/flux-night`; moving mast03 back to `main` needs it here, as the save-spirals run already is.

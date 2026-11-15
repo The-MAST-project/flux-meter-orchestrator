@@ -1,4 +1,4 @@
-# flux-meter
+# flux-meter-orchestrator
 
 HTTP service that holds the Thorlabs Zelux flux camera on `mast-ns-spec` and serves it to MAST units, and `flux_orchestrator`, which runs flux metering from mast-ns-spec against one unit: the max-flux run, and Param's save-spirals and fiber-focus runs. See `README.md` and `DECISIONS.md`.
 
@@ -30,4 +30,4 @@ The other half is `RemoteFluxMeter` in MAST_unit `src/flux_metering/remote.py`. 
 - The camera opens at startup and a failure exits the process; do not add reconnects, claims or open/close endpoints.
 - The frame-poll slack (`thorcam.POLL_SLACK_MS`) must stay below the client's `EXPOSE_SLACK_S` (10 s).
 - The Thorlabs SDK is not on PyPI and is not a declared dependency.
-- Hosted at `elibrody-weizmann/flux-meter` (private), not The-MAST-project, until it moves somewhere durable. Push there.
+- Hosted at `The-MAST-project/flux-meter-orchestrator` (private) since 2026-11-15, full history; `elibrody-weizmann/flux-meter` is superseded. Push there. The Python package and distribution names (`flux_meter_service`, `flux_orchestrator`, `flux-meter-service`) did not change with the repository's name.

@@ -1,6 +1,8 @@
-# flux-meter
+# flux-meter-orchestrator
 
-A small HTTP service that serves the Thorlabs Zelux (CS165MU) flux camera to the MAST telescope units over the site network. It runs on `mast-ns-spec`, where the camera is attached by USB; the units reach it with `RemoteFluxMeter` (MAST_unit `src/flux_metering/remote.py`), which is the other half of this contract.
+Two packages for MAST's flux metering, in [`The-MAST-project/flux-meter-orchestrator`](https://github.com/The-MAST-project/flux-meter-orchestrator): `flux_meter_service`, the HTTP service that holds the flux camera, and `flux_orchestrator`, which runs flux metering against one unit through its public API (below).
+
+The service is a small HTTP service that serves the Thorlabs Zelux (CS165MU) flux camera to the MAST telescope units over the site network. It runs on `mast-ns-spec`, where the camera is attached by USB; the units reach it with `RemoteFluxMeter` (MAST_unit `src/flux_metering/remote.py`), which is the other half of this contract.
 
 The service opens the camera when it starts and holds it until it stops. There is no open, close, claim or token on the wire: one flux-metering run at a time is an operating rule, and the service only serializes individual camera calls with a lock.
 
@@ -35,7 +37,7 @@ If the real camera does not open at startup, the process logs the reason and exi
 
 1. **Python 3.12 and uv.** Install Python 3.12 and [uv](https://docs.astral.sh/uv/).
 2. **ThorCam / ThorImageCAM.** Install Thorlabs' camera software. It provides the USB kernel driver, which the SDK's Python package does not. A working install shows **`Thorlabs Camera Zelux`, status OK** in Device Manager. A bare `TSI` device with problem code 28 means the driver is missing.
-3. **The service.** Copy this repository to the machine and, in it, run:
+3. **The service.** Clone the repository (`git clone https://github.com/The-MAST-project/flux-meter-orchestrator.git`) and, in it, run:
 
    ```
    uv sync --no-dev
@@ -54,6 +56,18 @@ If the real camera does not open at startup, the process logs the reason and exi
    ```powershell
    New-NetFirewallRule -DisplayName "MAST flux-meter" -Direction Inbound -Protocol TCP -LocalPort <PORT> -Action Allow
    ```
+
+## Install the orchestrator on a unit
+
+The orchestrator needs neither the Thorlabs SDK nor MAST\_common, only Python 3.12 and the network. On a unit (mast03's layout):
+
+```
+git clone https://github.com/The-MAST-project/flux-meter-orchestrator.git C:\Users\mast\flux-orchestrator\flux-meter-orchestrator
+C:\Python312\python.exe -m venv C:\Users\mast\flux-orchestrator\.venv
+C:\Users\mast\flux-orchestrator\.venv\Scripts\python.exe -m pip install C:\Users\mast\flux-orchestrator\flux-meter-orchestrator
+```
+
+Then run it from the clone with that venv's `python.exe -m flux_orchestrator...`, as below. `git pull` and the same `pip install` update it.
 
 ## Running by hand
 
