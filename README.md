@@ -2,6 +2,13 @@
 
 Two packages for MAST's flux metering, in [`The-MAST-project/flux-meter-orchestrator`](https://github.com/The-MAST-project/flux-meter-orchestrator): `flux_meter_service`, the HTTP service that holds the flux camera, and `flux_orchestrator`, which runs flux metering against one unit through its public API (below).
 
+**Not the permanent home of either.** Both halves are stopgaps with planned homes in the organization:
+
+- the flux camera's service moves into the spectrograph service on mast-ns-spec: [MAST_spec#129 Placeholder: serve the Thorlabs flux camera from the spec service's standard API, not a separate service](https://github.com/The-MAST-project/MAST_spec/issues/129);
+- the orchestrator's runs move into MAST-control: [MAST_control#52 Placeholder: run flux metering from MAST-control instead of a standalone orchestrator script](https://github.com/The-MAST-project/MAST_control/issues/52).
+
+Until those land, this repository is where both are run from, fixed and changed.
+
 The service is a small HTTP service that serves the Thorlabs Zelux (CS165MU) flux camera to the MAST telescope units over the site network. It runs on `mast-ns-spec`, where the camera is attached by USB; the units reach it with `RemoteFluxMeter` (MAST_unit `src/flux_metering/remote.py`), which is the other half of this contract.
 
 The service opens the camera when it starts and holds it until it stops. There is no open, close, claim or token on the wire: one flux-metering run at a time is an operating rule, and the service only serializes individual camera calls with a lock.
