@@ -42,6 +42,18 @@ def test_a_dll_dir_is_refused_off_windows(capsys):
     assert "Windows" in capsys.readouterr().err
 
 
+def test_a_dll_dir_that_does_not_exist_is_refused_by_name(capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
+    missing = tmp_path / "Thorlabs" / "dlls"
+
+    with pytest.raises(SystemExit) as exit_info:
+        parse_args(["--port", "8123", "--dll-dir", str(missing)])
+
+    assert exit_info.value.code == ARGPARSE_USAGE_ERROR
+    err = capsys.readouterr().err
+    assert str(missing) in err and "does not exist" in err
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="relies on the Thorlabs SDK being absent")
 def test_the_process_exits_when_the_real_camera_will_not_open():
     """Without the SDK the camera cannot open, and the process must end rather than serve."""

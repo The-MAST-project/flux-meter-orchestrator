@@ -71,17 +71,26 @@ Then run it from the clone with that venv's `python.exe -m flux_orchestrator...`
 
 ## Running by hand
 
+On mast-ns-spec, double-click `start-flux-meter.cmd` in the clone (a shortcut on the desktop points at it). It starts the service on port 8003 with the clone's venv, and keeps its window open after the service stops, so an error can be read. From a terminal, the same:
+
 ```
-.venv\Scripts\python -m flux_meter_service --port <PORT> --dll-dir C:\Thorlabs\dlls
+start-flux-meter.cmd            the real camera
+start-flux-meter.cmd --fake     noise frames, for testing the network path
 ```
+
+By hand, from the clone:
+
+```
+.venv\Scripts\python -m flux_meter_service --port 8003
+```
+
+`--dll-dir` is only for an SDK whose native DLLs are installed apart from its Python package. On mast-ns-spec they ship inside the package (`thorlabs_tsi_sdk\lib` in the venv), so leave it out; a `--dll-dir` that does not exist is refused by name.
 
 On success the log shows `opened CS165MU sn=... bit_depth=10 ...` and uvicorn listening. From a unit:
 
 ```
-curl --noproxy * http://mast-ns-spec:<PORT>/info
+curl --noproxy * http://mast-ns-spec:8003/info
 ```
-
-For a daylight network test without the camera, add `--fake` and drop `--dll-dir`.
 
 ## Flux-metering orchestrator
 
