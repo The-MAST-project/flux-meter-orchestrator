@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-15] Public, as the org's other repositories are
+
+**Why.** Units clone the orchestrator to install it (README), and a private repository would need credentials on every unit; MAST\_unit, MAST\_common and MAST\_provisioning are public.
+
+**What.** **Supersedes** the *Implications* of the entry below on visibility: the repository is public. The history was checked first for credentials, keys, vendor binaries and internal addresses; it holds none.
+
+**Implications.** Nothing secret goes in here: hosts and ports already public in MAST\_unit are fine, credentials never are.
+
 ## [2026-11-15] Moved to The-MAST-project as flux-meter-orchestrator
 
 **Why.** The orchestrator is being handed to Param to run flux metering on mast03, which needs a repository the team can reach, and MAST work belongs on The-MAST-project, not on personal forks.
