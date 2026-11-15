@@ -134,7 +134,7 @@ def test_every_imager_frame_is_paired_with_a_flux_frame(sky, tmp_path):
         assert all(pair.flux_frame in names for pair in cell.pairs)
         assert cell.shared_folder is not None and cell.shared_folder.endswith(cell.subfolder)
     on_disk = sorted(p.name for p in run.folder.glob("flux-*.fits"))
-    assert on_disk == sorted(f.name for cell in record.cells for f in cell.flux_frames)
+    assert on_disk == sorted(f.name for cell in record.cells for f in cell.flux_frames if f.kept)
 
 
 def test_the_clock_offset_is_measured_at_every_cell(sky, tmp_path):
@@ -415,3 +415,20 @@ def test_each_cells_imager_frames_are_moved_in_beside_its_flux_frames(sky, tmp_p
     assert record.cells[0].pairs[0].step_frame == "step-0-001-00.fits"
     assert record.cells[0].shared_folder is not None
     assert not Path(record.cells[0].shared_folder).exists()
+
+
+def test_one_flux_frame_is_kept_per_imager_frame_named_after_it(sky, tmp_path):
+    """The in-unit run's layout: flux-<ring>-<step>-<frame> beside step-<ring>-<step>-<frame>, one each;
+    the flux frames taken around them are deleted."""
+    record = make_run(sky, tmp_path, rings=1, number_of_frames=2).run()
+
+    folder = Path(record.folder)
+    names = sorted(p.name for p in folder.glob("*.fits"))
+    assert not [n for n in names if n.startswith("capture-")]
+    for cell in record.cells:
+        ring, within = save_spirals.ring_position(cell.index)
+        for n in range(2):
+            assert f"flux-{ring}-{within:03d}-{n:02d}.fits" in names
+            assert f"step-{ring}-{within:03d}-{n:02d}.fits" in names
+        assert [p.flux_frame for p in cell.pairs] == [f"flux-{ring}-{within:03d}-{n:02d}.fits" for n in range(2)]
+    assert len([n for n in names if n.startswith("flux-")]) == len([n for n in names if n.startswith("step-")])
