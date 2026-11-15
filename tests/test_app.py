@@ -17,6 +17,7 @@ import pytest
 from flux_orchestrator import unit_client
 from flux_orchestrator.app import AppLock, AppLockedError, OrchestratorApp, RunScreen, Services, history
 from flux_orchestrator.flux_client import FluxMeterClient
+from flux_orchestrator.progress import StopToken
 from flux_orchestrator.session import Kind, Session
 from flux_orchestrator.unit_client import UnitClient
 from tests.fakes import UNIT, Sky
@@ -369,3 +370,28 @@ def test_a_history_refresh_before_the_columns_exist_adds_them(tmp_path: Path):
             assert len(table.columns) == len(HISTORY_COLUMNS)  # type: ignore[attr-defined]
 
     asyncio.run(body())
+
+
+@in_loop
+async def test_g_stops_guiding_and_is_offered_only_while_the_unit_guides(tmp_path: Path):
+    app, _sky = make_app(tmp_path)
+    unit = Sky(share_root=tmp_path / "guiding", activities=["Guiding"])
+
+    def client(_session: Session, stop: StopToken | None = None) -> UnitClient:
+        return UnitClient(UNIT, client=httpx.Client(transport=httpx.MockTransport(unit.unit_handler)), stop=stop)
+
+    app.services.unit = client
+    app.services.status = client
+    async with app.run_test() as pilot:
+        main = app.main
+        assert main is not None
+        await until(pilot, app.unit_guiding, "guiding read")
+        assert main.check_action("stop_guiding", ()) is True
+        await pilot.press("g")
+        await pilot.press("y")
+        await until(pilot, lambda: "Guiding" not in unit.activities, "guiding stopped")
+        await until(pilot, lambda: not app.unit_guiding(), "the panel to see it")
+        assert main.check_action("stop_guiding", ()) is None
+        await pilot.press("g")
+        await pilot.pause()
+        assert app.screen is main

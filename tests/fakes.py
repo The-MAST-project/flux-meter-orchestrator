@@ -195,6 +195,7 @@ class Sky:
             "start_guiding": self._start_guiding,
             "focuser/position": self._focuser_position,
             "focuser/goto_known_as_good_position": self._focuser_home,
+            "stop_acquisition_and_guiding": self._stop_guiding,
         }
         if method not in endpoints:
             return httpx.Response(404)
@@ -383,6 +384,13 @@ class Sky:
             case "ends":
                 record |= {"ended": self.unit_now().isoformat(), "succeeded": False, "errors": ["PHD2: not connected"]}
                 self.activities.remove("Guiding")
+
+    def _stop_guiding(self, _params: dict[str, str]) -> httpx.Response:
+        if "Guiding" in self.activities:
+            self.activities.remove("Guiding")
+        if self.guiding_record is not None and self.guiding_record["ended"] is None:
+            self.guiding_record |= {"ended": self.unit_now().isoformat(), "succeeded": True}
+        return envelope()
 
     def _focuser_position(self, params: dict[str, str]) -> httpx.Response:
         target = int(params["position"])

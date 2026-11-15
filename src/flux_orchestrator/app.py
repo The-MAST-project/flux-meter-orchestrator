@@ -468,8 +468,7 @@ class RunScreen(Screen):
             text.append(f"  {finished.error}")
         if finished.guiding_left:
             text.append(
-                "\nguiding is still running on the unit; stop it through the unit's API "
-                "(stop_acquisition_and_guiding) before the next run",
+                "\nguiding is still running on the unit; press g on the main page to stop it before the next run",
                 style="yellow",
             )
         text.append("\nesc: back to main", style="dim")
@@ -493,8 +492,18 @@ class MainScreen(Screen):
         Binding("e", "edit_session", "Session"),
         Binding("enter", "open_run", "Set up run", show=False),
         Binding("h", "refresh_history", "History"),
+        Binding("g", "stop_guiding", "Stop guiding"),
         Binding("q", "quit_app", "Quit"),
     ]
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """`g` only while the unit guides and no run is going: the app's one unit action besides a run."""
+        if action == "stop_guiding":
+            return True if self.app.can_stop_guiding() else None  # type: ignore[attr-defined]
+        return True
+
+    def action_stop_guiding(self) -> None:
+        self.app.request_stop_guiding()  # type: ignore[attr-defined]
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -845,6 +854,8 @@ class OrchestratorApp(App):
     def on_unit_status(self, message: UnitStatus) -> None:
         if message.status is not None:
             self.last_status = message.status
+            if self.main is not None:
+                self.main.refresh_bindings()
         title = Text.assemble((f"Unit {self.session.unit}", "bold"), ("" if message.ok else "  not reachable", "red"))
         self._update_panel("#unit-panel", Text.assemble(title, "\n", message.text))
 
@@ -884,15 +895,40 @@ class OrchestratorApp(App):
         if self.active is not None:
             self.notify("A run is going: stop it first (s on its page).", severity="warning", markup=False)
             return
-        if "Guiding" in ((self.last_status or {}).get("activities_verbal") or []):
+        if self.unit_guiding():
             self.push_screen(
-                Confirm(
-                    "The unit is still guiding. Quitting leaves it guiding; stop it through the unit's API. Quit anyway?"
-                ),
+                Confirm("The unit is still guiding. Quitting leaves it guiding (g stops it). Quit anyway?"),
                 self._quit_confirmed,
             )
             return
         self.exit()
+
+    def unit_guiding(self) -> bool:
+        return "Guiding" in ((self.last_status or {}).get("activities_verbal") or [])
+
+    def can_stop_guiding(self) -> bool:
+        return self.active is None and self.unit_guiding()
+
+    def request_stop_guiding(self) -> None:
+        if not self.can_stop_guiding():
+            return
+        self.push_screen(
+            Confirm("Stop guiding on the unit? Tracking is kept as it was before guiding started."),
+            self._stop_guiding_confirmed,
+        )
+
+    def _stop_guiding_confirmed(self, yes: bool | None) -> None:
+        if yes and self.can_stop_guiding():
+            self._send_stop_guiding()
+
+    @work(thread=True, group="stop-guiding", exclusive=True)
+    def _send_stop_guiding(self) -> None:
+        try:
+            self.services.unit(self.session, None).stop_guiding()
+        except UnitApiError as ex:
+            self.call_from_thread(self.notify, f"Stopping guiding failed: {ex}", severity="error", markup=False)
+            return
+        self.call_from_thread(self.notify, "Guiding stopped.", markup=False)
 
     def _quit_confirmed(self, yes: bool | None) -> None:
         if yes:

@@ -174,7 +174,8 @@ python -m flux_orchestrator.app --unit mast03 --flux-meter http://mast-ns-spec:8
 - **The run page**: the phase, a progress bar (positions or cells; a max-flux walk has no known end), the last step, the products folder and the run's log. `s` (or `ctrl+c`) asks the run to stop, after a confirmation: it stops at its next check and ends as Ctrl+C would end it on the command line, cleanup included. A second `s` is a **hard stop**: it also sends `unit/abort`, for a run waiting inside a call that would not return; that stops guiding and tracking too. `esc` goes back to the main page once the run has ended.
 - **Session file**: `flux-orchestrator-session.json` in the working directory (`--session` to choose), saved on every change; it keeps only values changed from each run's defaults.
 - **One session per host**: a lock on `~/.flux-orchestrator.lock`; a second app refuses to start, whichever folder it is started from. Quitting (`q`, Ctrl+Q, the palette) is refused while a run is going.
-- **Not in the app**: unit actions (stop guiding, abort, find home, mirror moves). Use the unit's API directly.
+- **Stop guiding** (`g` on the main page): shown only while the unit guides and no run is going, as after a fiber-focus run, which leaves guiding on. Confirmed first; calls `stop_acquisition_and_guiding`.
+- **Not in the app**: other unit actions (abort, find home, mirror moves). Use the unit's API directly.
 - **Over ssh, a dropped connection ends the app and its run without the run's cleanup** (Windows ends the session's processes, and there is no tmux to detach into): the unit is not aborted, the focuser not sent home, and `result.json` keeps its last rewrite. Start long runs from the unit's desktop.
 
 ## Development

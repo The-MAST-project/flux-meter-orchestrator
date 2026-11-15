@@ -1,5 +1,13 @@
 # Decisions
 
+## [2026-11-15] The app can stop guiding
+
+**Why.** A fiber-focus run leaves guiding running, as the in-unit run did, and the next run is refused until it stops; with no way to stop it in the app, an operator was stuck (the hands-on review of 2026-11-15).
+
+**What.** One unit action besides the runs: `g` on the main page, offered only while the unit reports `Guiding` and no run is going, confirmed, calling `stop_acquisition_and_guiding`. **Refines** the entry below, which kept unit actions out of the app.
+
+**Implications.** Other unit actions stay in the unit's API.
+
 ## [2026-11-15] An interactive app over the runs
 
 **Why.** Param runs the orchestrator by hand on mast03. Three command lines with a dozen flags each, products found by path and Ctrl+C as the only stop are workable for a developer and slow for an operator.

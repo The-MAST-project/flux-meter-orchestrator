@@ -230,6 +230,11 @@ class UnitClient:
         the guiding thread, ends that record unsucceeded."""
         self._request("PUT", "start_guiding", {})
 
+    def stop_guiding(self) -> None:
+        """`PUT stop_acquisition_and_guiding`: ends guiding, keeping tracking as it was before
+        guiding started."""
+        self._request("PUT", "stop_acquisition_and_guiding", {})
+
     def move_focuser(self, position: int, interrupted: Callable[[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
         """Send the focuser to `position` and wait for the move to end. Returns the status read
         that showed it ended."""
