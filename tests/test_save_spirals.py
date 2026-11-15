@@ -402,11 +402,3 @@ def test_a_cell_beyond_the_last_ring_ends_the_walk_unexposed(sky, tmp_path, monk
     assert record.terminal == SpiralsTerminal.COMPLETED
     assert [cell.cell for cell in record.cells] == [(0, 0), (1, 0)]
     assert len(sky.expose_params) == 2
-
-
-def test_local_frames_records_the_units_own_folder_while_the_share_is_demoted(sky, tmp_path):
-    sky.share_unmapped = True
-    run = make_run(sky, tmp_path, local_frames=True)
-    run.run()
-    cells = recorded(run)["cells"]
-    assert cells and all(c["shared_folder"].startswith("D:/MAST/") for c in cells)

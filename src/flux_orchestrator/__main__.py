@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from flux_orchestrator.flux_client import FluxMeterClient
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOCAL_FRAMES_HELP, LOG_FORMAT, Run, RunParams
+from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, Run, RunParams
 from flux_orchestrator.spiral import Terminal
 from flux_orchestrator.unit_client import UNIT_PORT, Target, UnitClient
 
@@ -53,7 +53,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     paths = parser.add_argument_group("paths")
     paths.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help=f"default {DEFAULT_OUTPUT_ROOT}")
-    paths.add_argument("--local-frames", action="store_true", help=LOCAL_FRAMES_HELP)
 
     args = parser.parse_args(argv)
     if (args.ra is None) != (args.dec is None):
@@ -80,7 +79,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         usable_fraction=args.usable_fraction,
         center=tuple(args.center) if args.center else None,
         skip_acquisition=args.skip_acquisition,
-        local_frames=args.local_frames,
     )
     run = Run(
         params,

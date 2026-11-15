@@ -1,12 +1,12 @@
 # Decisions
 
-## [2026-11-11] `--local-frames`: read a demoted unit's frames from its own disk
+## [2026-11-15] `--local-frames` dropped
 
-**Why.** Both runs read or record the unit's frames by their share path, and refuse a unit whose share is demoted. With mast-ns-control's share down, no run could reach a unit at all, though a run on the unit itself can read the frames where the unit keeps them.
+**Why.** `--local-frames` (added 2026-11-11, for a unit whose share is demoted) rested on a wrong premise: while the share is demoted, the unit's mover still takes every frame off the RAM disk within about a second, to `C:/MAST/share-fallback/`, and spiral steps report `image: null`, so a read from `local_products_path` finds nothing. The fake unit did not model the mover, so the tests passed. The share is back, so the option is not needed.
 
-**What.** An opt-in `--local-frames` on both commands: while the unit reports no `shared_products_path`, its `local_products_path` is used instead. Without the flag a demoted share is still refused. The save-spirals `result.json` keeps its `shared_folder` key, which then holds the unit's own folder.
+**What.** The option and its 2026-11-11 entry are reverted; a demoted share is refused again, as before.
 
-**Implications.** Meant for a run on the unit itself; from any other host the unit's local path does not resolve and the read times out as a lost frame. If the share comes back mid-run, the unit's mover takes the frames off its disk and a later read can miss them.
+**Implications.** A run against a unit whose share is down waits for the share. If that case comes back, it starts from the fallback folder, not from the RAM disk.
 
 ## [2026-11-04] The save-spirals run reads the commanded RA step from `status.latest.spiral`
 

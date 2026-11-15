@@ -92,8 +92,6 @@ class RunParams:
     #: fiber-position measurement, and the flag is echoed into the result so it cannot be
     #: mistaken for one.
     skip_acquisition: bool = False
-    #: Run on the unit itself: read its frames from its own disk while its share is demoted.
-    local_frames: bool = False
 
     @property
     def flux_exposure_us(self) -> int:
@@ -195,15 +193,6 @@ def make_run_folder(output_root: Path, now: datetime.datetime, kind: str = RUN_F
     return folder
 
 
-LOCAL_FRAMES_HELP = "run on the unit itself: while its share is demoted, read its frames from its own disk"
-
-
-def frames_folder(record: dict[str, Any], local_frames: bool) -> str | None:
-    """Where a status record's frames are read: on the share, or with `local_frames` (a run on the
-    unit itself) on the unit's own disk while its share is demoted. None: neither."""
-    return record["shared_products_path"] or (record.get("local_products_path") if local_frames else None)
-
-
 def read_arriving[T](path: Path, read: Callable[[Path], T]) -> T:
     """Read a file the unit has queued for the share, waiting for it to arrive whole.
 
@@ -275,7 +264,7 @@ class Run:
         )
         self._stage = Stage.PREPARING
         self._rule = RingRule(patience_rings=params.patience_rings, max_rings=params.max_rings)
-        self._frames_folder: str | None = None
+        self._shared_folder: str | None = None
         self._last_aperture_position: tuple[float, float] | None = None
         self._dec_degrees: float | None = None
         self._pixel_scale: float | None = None
@@ -325,11 +314,10 @@ class Run:
             )
         spiral = self.unit.latest_spiral()
         self.record.spiral = spiral
-        folder = frames_folder(spiral, p.local_frames)
-        if folder is None:
+        if spiral["shared_products_path"] is None:
             raise UnitApiError(f"{p.unit}: the spiral's frames will not reach the share: the unit's share is demoted")
-        self._frames_folder = folder
-        reference = f"{folder}/{session['reference_image']}"
+        self._shared_folder = spiral["shared_products_path"]
+        reference = f"{self._shared_folder}/{session['reference_image']}"
         header, _data = read_frame(Path(reference))
         self._dec_degrees = numeric_card(header, DEC_CARD)
         self._pixel_scale = numeric_card(header, PIXEL_SCALE_CARD)
@@ -473,7 +461,7 @@ class Run:
     def _center(self) -> tuple[int, int, str]:
         """The correlation's center, as the unit resolved it for its own session: read from the
         record the session leaves beside its frames, which it writes however it ended."""
-        session = read_json(Path(f"{self._frames_folder}/{UNIT_SESSION_RESULT}"))
+        session = read_json(Path(f"{self._shared_folder}/{UNIT_SESSION_RESULT}"))
         return int(session["center_x"]), int(session["center_y"]), str(session["center_source"])
 
     def _commanded_offset_px(self, offset_arcsec: tuple[float, float] | None) -> tuple[float, float] | None:
