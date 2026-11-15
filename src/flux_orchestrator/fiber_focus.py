@@ -23,7 +23,7 @@ import json
 import logging
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -34,6 +34,7 @@ from astropy.io import fits
 from flux_meter_service.models import Settings
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
 from flux_orchestrator.photometry import saturated_pixels
+from flux_orchestrator.progress import EventKind, Reporter, RunEvent, StopToken, check, close, stopped_by
 from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, flux_frame_header, make_run_folder
 from flux_orchestrator.unit_client import (
     ABORTING,
@@ -195,6 +196,8 @@ class FiberFocusRecord:
     #: This run aborted the unit (an acquisition or mirror move in flight), and what that answered.
     unit_aborted: bool = False
     unit_abort_error: str | None = None
+    #: The app's stop that ended the run: one a check raised, or a hard stop.
+    stopped_by: str | None = None
 
 
 def _now() -> datetime.datetime:
@@ -232,6 +235,8 @@ class FiberFocusRun:
         unit: UnitClient,
         meter: FluxMeterClient,
         output_root: Path = DEFAULT_OUTPUT_ROOT,
+        stop: StopToken | None = None,
+        on_event: Callable[[RunEvent], None] | None = None,
     ) -> None:
         self.params = params
         self.unit = unit
@@ -242,6 +247,8 @@ class FiberFocusRun:
         self.record = FiberFocusRecord(
             params=params, folder=str(self.folder), started_at=_now().isoformat(), camera=self.camera.model_dump()
         )
+        self._stop = stop
+        self.report = Reporter(str(self.folder), on_event)
         self._phase = Phase.PREPARING
 
     def run(self) -> FiberFocusRecord:
@@ -254,7 +261,11 @@ class FiberFocusRun:
         `unit/abort` stops it."""
         try:
             try:
-                self.record.terminal = self._run()
+                try:
+                    self.record.terminal = self._run()
+                finally:
+                    # Before any cleanup below: a stop pressed during it must not cut it short.
+                    close(self._stop)
             except KeyboardInterrupt:
                 self.record.terminal = Terminal.ABORTED
                 if self._phase in (Phase.ACQUIRING, Phase.MIRROR):
@@ -279,9 +290,19 @@ class FiberFocusRun:
                 if self._phase is not Phase.PREPARING:
                     self._return_focuser()
         finally:
+            self.record.stopped_by = stopped_by(self._stop)
             self.record.ended_at = _now().isoformat()
             self._write_record()
+            self.report.emit(
+                EventKind.END,
+                str(self.record.terminal),
+                detail={"terminal": self.record.terminal, "error": self.record.error},
+            )
         return self.record
+
+    def _enter(self, phase: Phase) -> None:
+        self._phase = phase
+        self.report.enter(phase)
 
     def _run(self) -> Terminal:
         p = self.params
@@ -302,16 +323,16 @@ class FiberFocusRun:
         logger.info(f"{p.unit}: acquiring")
         # A refused request leaves nothing in flight, so the phase moves only once it is accepted.
         self.unit.start_acquisition(p.target, seconds=p.acquisition_seconds, gain=p.gain)
-        self._phase = Phase.ACQUIRING
+        self._enter(Phase.ACQUIRING)
         self.unit.wait_for_acquisition()
         # After the acquisition, which normally leaves the mirror in already.
-        self._phase = Phase.MIRROR
+        self._enter(Phase.MIRROR)
         self.unit.put_mirror_in()
 
-        self._phase = Phase.GUIDING
+        self._enter(Phase.GUIDING)
         self._start_guiding_and_settle()
 
-        self._phase = Phase.FOCUSING
+        self._enter(Phase.FOCUSING)
         for index, commanded in enumerate(self.record.commanded_positions):
             self.record.positions.append(self._expose_position(index, commanded))
             self._write_record()
@@ -342,6 +363,7 @@ class FiberFocusRun:
             raise GuidingError(f"{p.unit}: start_guiding refused: {ex}") from ex
 
         while True:
+            check(self._stop)
             status = self.unit.status()
             waited = time.monotonic() - commanded
             if self._interrupted(status):
@@ -380,6 +402,7 @@ class FiberFocusRun:
             if record["settle"] == SettleOutcome.SETTLED:
                 settle.outcome = SettleOutcome.SETTLED
                 logger.info(f"{p.unit}: guiding settled after {waited:.1f} s")
+                self.report.emit(EventKind.STEP, f"guiding settled after {waited:.0f} s")
                 return True
             settle.outcome = SettleOutcome.FAILED
             raise GuidingError(f"{p.unit}: PHD2 reported that settling failed: {settle.error}")
@@ -391,6 +414,7 @@ class FiberFocusRun:
 
     def _expose_position(self, index: int, commanded: int) -> PositionRecord:
         p = self.params
+        check(self._stop)
         self.unit.move_focuser(commanded, interrupted=self._interrupted)
         time.sleep(p.settle_seconds)
         # One read for the position and the pointing, so the header samples one instant.
@@ -403,6 +427,7 @@ class FiberFocusRun:
         position = PositionRecord(index=index, commanded=commanded, measured=int(measured), settled_utc=_now().isoformat())
         pointing = status.get("mount") or {}
         for n in range(p.frames_per_position):
+            check(self._stop)
             if n > 0:
                 # The frames already taken stay recorded; the ones after an abort are never taken.
                 self._check_not_interrupted(f"at position {index + 1}, before frame {n}")
@@ -417,6 +442,14 @@ class FiberFocusRun:
                     saturated_pixels=saturated_pixels(frame.data, self.camera.saturation_level),
                 )
             )
+            self.report.emit(EventKind.FRAME, name, done=n + 1, total=p.frames_per_position, detail={"position": index + 1})
+        self.report.emit(
+            EventKind.STEP,
+            f"position {index + 1}/{p.count}: commanded {commanded}, measured {measured}",
+            done=index + 1,
+            total=p.count,
+            detail={"commanded": commanded, "measured": position.measured, "frames": len(position.frames)},
+        )
         logger.info(
             f"position {index + 1}/{p.count}: commanded {commanded}, measured {measured} ({len(position.frames)} frames)"
         )
@@ -426,7 +459,7 @@ class FiberFocusRun:
         """Send the focuser to `known_as_good_position`. Waits out an abort first, whose focuser
         stop would otherwise land after the move and leave it short. Recorded, never raised, so it
         cannot hide what ended the run."""
-        self._phase = Phase.RETURNING
+        self._enter(Phase.RETURNING)
         try:
             if is_active(self.unit.status(), ABORTING):
                 self.unit.wait_for_abort_done()

@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from flux_orchestrator.progress import StopToken, check
+
 UNIT_PORT = 8000
 UNIT_BASE_PATH = "/mast/api/v1/unit"
 REQUEST_TIMEOUT_S = 20.0
@@ -82,8 +84,12 @@ class SpiralStep:
 
 
 class UnitClient:
-    def __init__(self, host: str, port: int = UNIT_PORT, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self, host: str, port: int = UNIT_PORT, client: httpx.Client | None = None, stop: StopToken | None = None
+    ) -> None:
         self.name = host
+        #: The app's stop request for the run using this client, checked in every wait.
+        self.stop = stop
         self.base_url = f"http://{host}:{port}{UNIT_BASE_PATH}"
         self._client = client or httpx.Client(timeout=REQUEST_TIMEOUT_S, trust_env=False)
 
@@ -283,6 +289,7 @@ class UnitClient:
     ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_s
         while True:
+            check(self.stop)
             status = self.status()
             if interrupted is not None and interrupted(status):
                 raise UnitInterruptedError(f"{self.name}: interrupted while waiting for {what}")
