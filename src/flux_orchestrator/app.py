@@ -43,6 +43,7 @@ from textual.worker import get_current_worker
 from flux_meter_service.save import observing_night
 from flux_orchestrator import fiber_focus, save_spirals
 from flux_orchestrator import run as max_flux
+from flux_orchestrator.coords import parse_coordinates, sexagesimal
 from flux_orchestrator.flux_client import FluxMeterClient
 from flux_orchestrator.progress import EventKind, RunEvent, StopKind, StopToken
 from flux_orchestrator.session import SESSION_FILE, TITLES, Kind, Session, SessionError
@@ -539,8 +540,8 @@ class MainScreen(Screen):
     def refresh_session(self) -> None:
         s: Session = self.app.session  # type: ignore[attr-defined]
         target = (
-            f"RA {s.ra_j2000_hours} h, Dec {s.dec_j2000_degs}°"
-            if s.ra_j2000_hours is not None
+            f"RA {s.ra_j2000_hours:.5f} h, Dec {s.dec_j2000_degs:+.4f}°  ({sexagesimal(s.ra_j2000_hours, s.dec_j2000_degs)})"
+            if s.ra_j2000_hours is not None and s.dec_j2000_degs is not None
             else (s.object_name or "where the telescope points")
         )
         ready = s.why_not_ready()
@@ -646,6 +647,12 @@ class OrchestratorApp(App):
             FormField("flux_meter", "flux-meter URL (e.g. http://mast-ns-spec:8003)", s.flux_meter, "not set"),
             FormField("output_root", "the share's MAST folder (runs go under <unit> or mast-ns-spec)", s.output_root),
             FormField(
+                "paste",
+                "paste RA Dec here (01:58:01.2 +28:31:12, 01h58m01s +28d31m12s, or 29.5 28.52); fills the two below",
+                "",
+                "e.g. 01:58:01.2 +28:31:12",
+            ),
+            FormField(
                 "ra", "RA J2000, decimal hours (empty: none)", "" if s.ra_j2000_hours is None else str(s.ra_j2000_hours)
             ),
             FormField("dec", "Dec J2000, decimal degrees", "" if s.dec_j2000_degs is None else str(s.dec_j2000_degs)),
@@ -665,10 +672,13 @@ class OrchestratorApp(App):
             port = int(values["unit_port"])
             if not 1 <= port <= 65535:
                 return f"unit port {port} is not 1 to 65535"
-            ra = float(values["ra"]) if values["ra"].strip() else None
-            dec = float(values["dec"]) if values["dec"].strip() else None
+            if values.get("paste", "").strip():
+                ra, dec = parse_coordinates(values["paste"])
+            else:
+                ra = float(values["ra"]) if values["ra"].strip() else None
+                dec = float(values["dec"]) if values["dec"].strip() else None
         except ValueError as ex:
-            return f"not a number: {ex}"
+            return str(ex) if values.get("paste", "").strip() else f"not a number: {ex}"
         if ra is not None and not (math.isfinite(ra) and 0 <= ra < 24):
             return f"RA {ra} is not 0 to 24 hours"
         if dec is not None and not (math.isfinite(dec) and -90 <= dec <= 90):

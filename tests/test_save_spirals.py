@@ -168,7 +168,8 @@ def test_the_flux_frames_say_where_they_were_taken(sky, tmp_path):
     record = run.run()
 
     cell = record.cells[2]
-    header = fits.getheader(run.folder / cell.flux_frames[0].name)
+    kept = next(f for f in cell.flux_frames if f.kept)
+    header = fits.getheader(run.folder / kept.name)
     assert (header["CELLX"], header["CELLY"], header["RING"]) == (1, -1, 1)
     assert (header["NAMERING"], header["RINGSTEP"]) == (1, 2)
     assert header["IMGDIR"] == cell.subfolder

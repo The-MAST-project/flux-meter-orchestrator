@@ -395,3 +395,30 @@ async def test_g_stops_guiding_and_is_offered_only_while_the_unit_guides(tmp_pat
         await pilot.press("g")
         await pilot.pause()
         assert app.screen is main
+
+
+@in_loop
+async def test_pasted_coordinates_fill_ra_and_dec(tmp_path: Path):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.edit_session()
+        await pilot.pause()
+        app.screen.query_one("#field-paste").value = "01:58:01.2 +28:31:12"  # type: ignore[attr-defined]
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.3)
+        assert app.session.ra_j2000_hours == pytest.approx(1.96700, abs=1e-5)
+        assert app.session.dec_j2000_degs == pytest.approx(28.52, abs=1e-4)
+        assert "01:58:01.20 +28:31:12.0" in str(app.main.query_one("#session-panel").render())  # type: ignore[union-attr]
+
+
+@in_loop
+async def test_a_paste_that_is_not_a_position_keeps_the_form_open(tmp_path: Path):
+    app, _sky = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.edit_session()
+        await pilot.pause()
+        app.screen.query_one("#field-paste").value = "25:00:00 +10:00:00"  # type: ignore[attr-defined]
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert "RA" in str(app.screen.query_one("#form-error").render())
+        assert app.session.ra_j2000_hours == 1.0
