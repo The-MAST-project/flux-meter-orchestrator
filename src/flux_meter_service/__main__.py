@@ -43,6 +43,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.dll_dir is not None and sys.platform != "win32":
         parser.error("--dll-dir is Windows-only: it calls os.add_dll_directory")
+    if args.dll_dir is not None and not args.dll_dir.is_dir():
+        parser.error(
+            f"--dll-dir {args.dll_dir} does not exist. Leave it out when the SDK package carries its own DLLs "
+            "(thorlabs_tsi_sdk\\lib in the venv, as on mast-ns-spec)."
+        )
     return args
 
 
