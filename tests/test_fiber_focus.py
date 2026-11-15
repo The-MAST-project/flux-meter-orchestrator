@@ -463,3 +463,25 @@ def test_records_that_never_read_time_out_naming_the_units_errors(sky: Sky, tmp_
     assert record.terminal == Terminal.GUIDING_FAILED
     assert settle_of(record).outcome == SettleOutcome.TIMEOUT
     assert "PWI4 did not answer" in (record.error or "")
+
+
+def test_an_abort_that_stops_the_mirror_between_presets_sends_it_back_to_sky(
+    sky: Sky, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Found on mast03, 2026-11-15: a stop during the mirror move left the stage at 235250, and the
+    unit refused every run after it until the mirror was at a preset again."""
+    run = make_run(sky, tmp_path)
+    put_mirror_in = run.unit.put_mirror_in
+
+    def interrupted_mid_move() -> None:
+        sky.at_preset = None  # the move under way
+        sky.stage_target = "spec"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run.unit, "put_mirror_in", interrupted_mid_move)
+    record = run.run()
+
+    assert record.terminal == Terminal.ABORTED
+    assert record.unit_aborted and record.mirror_parked is True
+    assert sky.at_preset == "sky"
+    assert put_mirror_in is not None

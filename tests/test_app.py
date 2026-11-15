@@ -133,7 +133,7 @@ async def test_a_run_set_up_from_the_menu_is_watched_to_its_end_and_lands_in_his
         assert app.screen is app.main
         saved = json.loads((tmp_path / "session.json").read_text())
         assert saved["overrides"]["fiber_focus"]["count"] == 2
-        rows = history(tmp_path / "out", datetime.datetime.now(datetime.UTC))
+        rows = history(tmp_path / "out", UNIT, datetime.datetime.now(datetime.UTC))
         assert [r.terminal for r in rows] == ["completed"]
 
 

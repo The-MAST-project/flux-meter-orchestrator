@@ -31,6 +31,7 @@ ACQUISITION_TIMEOUT_S = 900.0
 #: A Sky->Spec traverse was measured at 21-22 s on mast02 (2026-09-02); a ceiling, not a tolerance.
 STAGE_TIMEOUT_S = 120.0
 SPEC_PRESET = "spec"
+SKY_PRESET = "sky"
 #: One focuser move; a ceiling, not a tolerance: a sweep step takes seconds, the whole travel well under this.
 FOCUSER_TIMEOUT_S = 120.0
 #: `unit/abort` answers before anything has stopped; `Aborting` clears once it all has.
@@ -145,6 +146,23 @@ class UnitClient:
             return
         self._request("PUT", "stage/move_to_preset", {"preset": SPEC_PRESET})
         self._wait_for("the folding mirror to reach SPEC", STAGE_TIMEOUT_S, lambda s: self._stage_preset(s) == SPEC_PRESET)
+
+    def abort_and_park(self) -> bool:
+        """`unit/abort`, then the folding mirror back to SKY if the abort stopped it between the
+        presets, where the unit counts as not operational and refuses every run. True when the
+        mirror had to be moved. Waits for the abort to finish first: a move sent while the stage is
+        still aborting would be stopped too."""
+        self.abort()
+        self.wait_for_abort_done()
+        return self.park_mirror()
+
+    def park_mirror(self) -> bool:
+        """The folding mirror to SKY if it is at neither preset; True when it had to be moved."""
+        if self._stage_preset(self.status()) is not None:
+            return False
+        self._request("PUT", "stage/move_to_preset", {"preset": SKY_PRESET})
+        self._wait_for("the folding mirror to reach SKY", STAGE_TIMEOUT_S, lambda s: self._stage_preset(s) == SKY_PRESET)
+        return True
 
     def spiral_new_path(
         self,

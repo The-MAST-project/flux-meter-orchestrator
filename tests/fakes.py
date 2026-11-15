@@ -156,6 +156,9 @@ class Sky:
     _aborting: int = 0
     #: The folding mirror never reaches SPEC.
     stage_stuck: bool = False
+    stage_target: str = "spec"
+    #: An abort caught the mirror mid-move and stopped it between the presets.
+    stage_stopped: bool = False
     #: `start_acquisition_and_guiding` is refused in the envelope.
     acquisition_refused: bool = False
     #: Status reads whose `latest` records failed: no `latest.guiding`, the reason in `errors`.
@@ -208,8 +211,10 @@ class Sky:
         self.acquisition = {"state": "running", "errors": [], "started": "t", "ended": None, "succeeded": None}
         return envelope()
 
-    def _move_stage(self, _params: dict[str, str]) -> httpx.Response:
+    def _move_stage(self, params: dict[str, str]) -> httpx.Response:
         self.at_preset = None
+        self.stage_target = params.get("preset", "spec")
+        self.stage_stopped = False
         return envelope()
 
     def _spiral_new_path(self, params: dict[str, str]) -> httpx.Response:
@@ -333,6 +338,11 @@ class Sky:
             if self.guiding and n == 0:
                 started = requested - datetime.timedelta(seconds=GUIDE_FRAME_AGE_S)
             frame |= {"date_obs": started.isoformat(), "exposure_seconds": exposure["exposure_seconds"]}
+            # As the unit's mover does: the frame lands on the share under the series' folder.
+            if exposure["shared_products_path"] is not None:
+                target = Path(exposure["shared_products_path"]) / frame["name"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(target, overwrite=True)
         exposure["frames"].append(frame)
         exposure["completed"] = sum(1 for f in exposure["frames"] if f["error"] is None)
         if len(exposure["frames"]) == exposure["repeats"]:
@@ -434,6 +444,9 @@ class Sky:
     def _abort(self, _params: dict[str, str]) -> httpx.Response:
         if self.abort_lags:
             return envelope()
+        if self.at_preset is None:
+            # As Stage.abort does: the mirror stops where it is.
+            self.stage_stopped = True
         if self.exposure is not None and self.exposure["ended"] is None:
             self.exposure |= {"ended": self.unit_now().isoformat(), "succeeded": False}
         if self.session_open:
@@ -488,8 +501,8 @@ class Sky:
         # Each read moves the slow things one poll along.
         if self.acquisition is not None and self.acquisition["state"] == "running":
             self.acquisition = {**self.acquisition, "state": self.acquisition_outcome}
-        if self.at_preset is None and not self.stage_stuck:
-            self.at_preset = "spec"
+        if self.at_preset is None and not self.stage_stuck and not self.stage_stopped:
+            self.at_preset = self.stage_target
         return status
 
     # ------------------------------------------------------- the flux-meter service --

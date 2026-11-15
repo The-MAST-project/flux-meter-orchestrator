@@ -402,3 +402,16 @@ def test_a_cell_beyond_the_last_ring_ends_the_walk_unexposed(sky, tmp_path, monk
     assert record.terminal == SpiralsTerminal.COMPLETED
     assert [cell.cell for cell in record.cells] == [(0, 0), (1, 0)]
     assert len(sky.expose_params) == 2
+
+
+def test_each_cells_imager_frames_are_moved_in_beside_its_flux_frames(sky, tmp_path):
+    """The in-unit run's layout: step-<ring>-<step>-<frame>.fits beside flux-<ring>-<step>-<frame>.fits."""
+    record = make_run(sky, tmp_path, rings=1, number_of_frames=2).run()
+
+    folder = Path(record.folder)
+    names = sorted(p.name for p in folder.glob("*.fits"))
+    assert "step-0-001-00.fits" in names and "step-0-001-01.fits" in names
+    assert "flux-0-001-00.fits" in names
+    assert record.cells[0].pairs[0].step_frame == "step-0-001-00.fits"
+    assert record.cells[0].shared_folder is not None
+    assert not Path(record.cells[0].shared_folder).exists()
