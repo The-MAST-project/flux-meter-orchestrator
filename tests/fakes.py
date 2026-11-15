@@ -154,6 +154,8 @@ class Sky:
     #: Status reads `Aborting` stays raised after an abort.
     aborting_reads: int = 1
     _aborting: int = 0
+    #: The folding mirror never reaches SPEC.
+    stage_stuck: bool = False
     #: `start_acquisition_and_guiding` is refused in the envelope.
     acquisition_refused: bool = False
     #: Status reads whose `latest` records failed: no `latest.guiding`, the reason in `errors`.
@@ -478,7 +480,7 @@ class Sky:
         # Each read moves the slow things one poll along.
         if self.acquisition is not None and self.acquisition["state"] == "running":
             self.acquisition = {**self.acquisition, "state": self.acquisition_outcome}
-        if self.at_preset is None:
+        if self.at_preset is None and not self.stage_stuck:
             self.at_preset = "spec"
         return status
 

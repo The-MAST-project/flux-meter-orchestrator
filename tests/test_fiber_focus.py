@@ -396,6 +396,7 @@ def test_a_refused_acquisition_request_does_not_abort_the_unit(sky: Sky, tmp_pat
 
 
 def test_a_mirror_move_that_times_out_is_not_aborted(sky: Sky, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    sky.stage_stuck = True
     monkeypatch.setattr(unit_client, "STAGE_TIMEOUT_S", 0.0)
     run = make_run(sky, tmp_path)
 
