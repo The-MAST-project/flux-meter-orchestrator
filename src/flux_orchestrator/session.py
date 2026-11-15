@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from flux_orchestrator.fiber_focus import FiberFocusParams
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, RunParams
+from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, SHARE_ROOT, RunParams
 from flux_orchestrator.save_spirals import SpiralsParams
 from flux_orchestrator.unit_client import UNIT_PORT, Target
 
@@ -71,7 +71,8 @@ class Session:
     unit: str = ""
     unit_port: int = UNIT_PORT
     flux_meter: str = ""
-    output_root: str = str(DEFAULT_OUTPUT_ROOT)
+    #: The share's MAST folder; each run files under the unit's folder or mast-ns-spec in it.
+    output_root: str = str(SHARE_ROOT)
     ra_j2000_hours: float | None = None
     dec_j2000_degs: float | None = None
     object_name: str | None = None
@@ -139,6 +140,9 @@ class Session:
         raw = json.loads(path.read_text(encoding="utf-8"))
         known = {f.name for f in dataclasses.fields(cls)}
         session = cls(**{name: value for name, value in raw.items() if name in known})
+        if session.output_root == str(DEFAULT_OUTPUT_ROOT):
+            # A session saved when this was the mast-ns-spec folder itself.
+            session.output_root = str(SHARE_ROOT)
         # A parameter a run no longer has (renamed, removed) is dropped, not passed to it.
         for kind in list(session.overrides):
             if kind not in {k.value for k in Kind}:

@@ -21,6 +21,7 @@ import datetime
 import json
 import logging
 import math
+import shutil
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -35,7 +36,14 @@ from flux_meter_service.models import Settings
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
 from flux_orchestrator.photometry import saturated_pixels
 from flux_orchestrator.progress import EventKind, Reporter, RunEvent, StopToken, check, close, stopped_by
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, RA_STEP_COMMANDED, flux_frame_header, make_run_folder
+from flux_orchestrator.run import (
+    LOG_FORMAT,
+    RA_STEP_COMMANDED,
+    flux_frame_header,
+    make_run_folder,
+    read_arriving,
+    unit_root,
+)
 from flux_orchestrator.unit_client import UNIT_PORT, SpiralStep, Target, UnitApiError, UnitClient
 
 logger = logging.getLogger(__name__)
@@ -90,6 +98,22 @@ class SpiralsParams:
     def total_cells(self) -> int:
         """The origin, plus 8n cells on ring n."""
         return (2 * self.rings + 1) ** 2
+
+
+def _park(unit: UnitClient) -> bool | None:
+    """The mirror to SKY after an abort, if it stopped between presets; recorded, never raised."""
+    try:
+        unit.wait_for_abort_done()
+        return unit.park_mirror()
+    except UnitApiError as ex:
+        logger.error(f"after the abort, the folding mirror: {ex}")
+        return None
+
+
+def frame_name(kind: str, ring: int, within: int, frame: int) -> str:
+    """`flux-1-003-00.fits`, `step-1-003-00.fits`: the in-unit run's names (ring, step within the
+    ring from 001, frame within the cell from 00)."""
+    return f"{kind}-{ring}-{within:03d}-{frame:02d}.fits"
 
 
 def ring_position(index: int) -> tuple[int, int]:
@@ -167,6 +191,8 @@ class Pair:
     predates_request: bool
     flux_frame: str | None
     overlap_seconds: float
+    #: The imager frame's name in the run folder, once moved there.
+    step_frame: str | None = None
 
 
 @dataclass
@@ -206,6 +232,9 @@ class SpiralsRecord:
     unit_abort_error: str | None = None
     #: The unit's records said the session and the series had ended; None when the abort failed.
     unit_abort_confirmed: bool | None = None
+    #: After the abort, the folding mirror was found between the presets and sent to SKY; None when
+    #: that could not be checked.
+    mirror_parked: bool | None = None
     #: The app's stop that ended the run: one a check raised, or a hard stop.
     stopped_by: str | None = None
     cells: list[Cell] = field(default_factory=list)
@@ -225,7 +254,7 @@ class SpiralsRun:
         params: SpiralsParams,
         unit: UnitClient,
         meter: FluxMeterClient,
-        output_root: Path = DEFAULT_OUTPUT_ROOT,
+        output_root: Path | None = None,
         stop: StopToken | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> None:
@@ -234,7 +263,8 @@ class SpiralsRun:
         self.meter = meter
         # Before the folder: a service that is not there should not leave an empty run behind.
         self.camera = meter.info()
-        self.folder = make_run_folder(output_root, _now(), kind=RUN_FOLDER)
+        # The unit's own folder by default, beside its other products, as the in-unit run filed them.
+        self.folder = make_run_folder(output_root or unit_root(params.unit), _now(), kind=RUN_FOLDER)
         self.record = SpiralsRecord(
             params=params, folder=str(self.folder), started_at=_now().isoformat(), camera=self.camera.model_dump()
         )
@@ -365,7 +395,7 @@ class SpiralsRun:
         deadline = time.monotonic() + p.number_of_frames * (p.step_seconds + FRAME_OVERHEAD_S)
         while True:
             check(self._stop)
-            name = f"flux-{ring}-{within:03d}-{len(flux):03d}.fits"
+            name = frame_name("flux", ring, within, len(flux))
             frame = self.meter.expose()
             self._write_flux_frame(name, frame, cell)
             flux.append(frame)
@@ -393,11 +423,31 @@ class SpiralsRun:
         cell.shared_folder = exposure["shared_products_path"]
         cell.clock_offset = ClockOffset.bracketed(_parse_utc(exposure["started"]), sent, answered)
         cell.pairs = self._pairs(exposure, cell.clock_offset, flux, cell.flux_frames)
+        self._collect_imager_frames(cell, ring, within)
         logger.info(
             f"step {index}: cell={moved.cell} ring={moved.ring}: {exposure['completed']} of {p.number_of_frames} "
             f"imager frames, {len(flux)} flux frames"
         )
         return cell
+
+    def _collect_imager_frames(self, cell: Cell, ring: int, within: int) -> None:
+        """Move the cell's imager frames from the unit's `Exposures` subfolder into the run folder,
+        as `step-<ring>-<step>-<frame>.fits` beside the flux frames: the in-unit run's layout. Each
+        is waited for first, since the unit's mover delivers it to the share some time after the
+        series ends."""
+        shared = Path(cell.shared_folder or "")
+        for n, pair in enumerate(cell.pairs):
+            if pair.imager_error is not None:
+                continue
+            source = shared / pair.imager_frame
+            read_arriving(source, fits.getheader)
+            target = frame_name("step", ring, within, n)
+            shutil.move(source, self.folder / target)
+            pair.step_frame = target
+        try:
+            shared.rmdir()
+        except OSError:
+            logger.warning(f"left '{shared}' in place: it is not empty")
 
     def _own_exposure(self, subfolder: str) -> dict[str, Any]:
         """The unit's record of the series this cell started, refused if it is another's or the
@@ -478,6 +528,7 @@ class SpiralsRun:
             self.record.unit_abort_confirmed = False
         else:
             self.record.unit_abort_confirmed = True
+        self.record.mirror_parked = _park(self.unit)
 
     def _write_flux_frame(self, name: str, frame: FluxFrame, cell: Cell) -> None:
         p = self.params
@@ -533,7 +584,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--flux-black-level", type=int, default=DEFAULTS.flux_black_level)
 
     paths = parser.add_argument_group("paths")
-    paths.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help=f"default {DEFAULT_OUTPUT_ROOT}")
+    paths.add_argument(
+        "--output-root",
+        type=Path,
+        help="default: the unit's folder on the share, \\\\mast-ns-control\\mast-share\\MAST\\<unit>",
+    )
 
     args = parser.parse_args(argv)
     if (args.ra is None) != (args.dec is None):

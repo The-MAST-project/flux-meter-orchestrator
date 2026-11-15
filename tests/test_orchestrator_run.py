@@ -217,7 +217,9 @@ def test_an_interruption_before_the_spiral_aborts_the_unit(sky, tmp_path, monkey
     record = run.run()
 
     assert record.terminal == Terminal.ABORTED
-    assert sky.calls[-1] == "abort"
+    # The abort, then only reads: the mirror was at a preset, so nothing was moved.
+    after = sky.calls[sky.calls.index("abort") + 1 :]
+    assert after and all(call == "status" for call in after)
     assert "spiral_new_path" not in sky.calls
 
 

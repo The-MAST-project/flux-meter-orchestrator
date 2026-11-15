@@ -1,5 +1,21 @@
 # Decisions
 
+## [2026-11-15] After an abort, the mirror goes back to SKY
+
+**Why.** Found by Param on mast03, 2026-11-15: a stop during a run's acquisition aborted the unit while the folding mirror was moving, which stopped it at 235250, between SKY and SPEC. The unit counts as operational only with the mirror at a preset, so every later run was refused until the mirror was moved by hand. The fake unit did not model a mid-move stop, so neither the tests nor the hands-on review met it.
+
+**What.** `UnitClient.abort_and_park`: `unit/abort`, wait for `Aborting` to clear, then if the mirror is at neither preset, `stage/move_to_preset sky` and wait for it. Every abort the orchestrator sends uses it (each run's abort during the acquisition or mirror move, and the app's hard stop); records note `mirror_parked`. The fake now stops a moving mirror on abort.
+
+**Implications.** SKY, not SPEC: it is where an acquisition starts, and the unit is fit to work there.
+
+## [2026-11-15] Param's runs file in the unit's folder, in the in-unit layout
+
+**Why.** Param's analysis reads the in-unit runs' layout (`Z:\MAST\mast03\2026-11-10\FluxMetering\0012`, `...\FiberFocus\0007`): one folder per run under the unit's own folder, the imager and flux frames side by side.
+
+**What.** Save-spirals and fiber focus default to `\\mast-ns-control\mast-share\MAST\<unit>` as their root; save-spirals names flux frames `flux-<ring>-<step>-<frame>.fits` (two-digit frame) and, after each cell, waits for the unit's imager frames on the share and moves them in as `step-<ring>-<step>-<frame>.fits`. The max-flux run keeps `mast-ns-spec`. The app's output setting becomes the share's MAST folder, with each run under its root. **Refines** the entry below on the folder name.
+
+**Implications.** The orchestrator writes into a unit's folder and moves the unit's frames, so it runs where the share is writable. Tonight's first runs (`mast-ns-spec\2026-11-15\save-spirals\0001`, `...\FiberFocus\0001`-`0003`) stay where they are.
+
 ## [2026-11-15] Save-spirals products under FluxMetering/
 
 **Why.** Param, who runs and analyzes these, asked for the in-unit run's folder name, so his analysis finds the orchestrator's runs where it found the in-unit ones.

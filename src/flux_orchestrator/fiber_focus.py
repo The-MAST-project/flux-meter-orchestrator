@@ -35,7 +35,7 @@ from flux_meter_service.models import Settings
 from flux_orchestrator.flux_client import US_PER_S, FluxFrame, FluxMeterClient
 from flux_orchestrator.photometry import saturated_pixels
 from flux_orchestrator.progress import EventKind, Reporter, RunEvent, StopToken, check, close, stopped_by
-from flux_orchestrator.run import DEFAULT_OUTPUT_ROOT, LOG_FORMAT, flux_frame_header, make_run_folder
+from flux_orchestrator.run import LOG_FORMAT, flux_frame_header, make_run_folder, unit_root
 from flux_orchestrator.unit_client import (
     ABORTING,
     MOVING,
@@ -196,6 +196,8 @@ class FiberFocusRecord:
     #: This run aborted the unit (an acquisition or mirror move in flight), and what that answered.
     unit_aborted: bool = False
     unit_abort_error: str | None = None
+    #: After the abort, the folding mirror was found between the presets and sent to SKY.
+    mirror_parked: bool | None = None
     #: The app's stop that ended the run: one a check raised, or a hard stop.
     stopped_by: str | None = None
 
@@ -234,7 +236,7 @@ class FiberFocusRun:
         params: FiberFocusParams,
         unit: UnitClient,
         meter: FluxMeterClient,
-        output_root: Path = DEFAULT_OUTPUT_ROOT,
+        output_root: Path | None = None,
         stop: StopToken | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> None:
@@ -243,7 +245,8 @@ class FiberFocusRun:
         self.meter = meter
         # Before the folder: a service that is not there should not leave an empty run behind.
         self.camera = meter.info()
-        self.folder = make_run_folder(output_root, _now(), kind=RUN_FOLDER)
+        # The unit's own folder by default, as the in-unit run filed its products.
+        self.folder = make_run_folder(output_root or unit_root(params.unit), _now(), kind=RUN_FOLDER)
         self.record = FiberFocusRecord(
             params=params, folder=str(self.folder), started_at=_now().isoformat(), camera=self.camera.model_dump()
         )
@@ -473,9 +476,11 @@ class FiberFocusRun:
         self.record.final_focuser_measured = focuser.get("position")
 
     def _abort_unit(self) -> None:
+        """Abort the unit, then send the folding mirror to SKY if the abort stopped it between the
+        presets: the unit refuses every run until it is at one."""
         self.record.unit_aborted = True
         try:
-            self.unit.abort()
+            self.record.mirror_parked = self.unit.abort_and_park()
         except UnitApiError as ex:
             logger.error(f"aborting the unit: {ex}")
             self.record.unit_abort_error = str(ex)
@@ -556,7 +561,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--guide-settle-timeout", type=float, default=DEFAULTS.guide_settle_timeout_seconds)
 
     paths = parser.add_argument_group("paths")
-    paths.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help=f"default {DEFAULT_OUTPUT_ROOT}")
+    paths.add_argument(
+        "--output-root",
+        type=Path,
+        help="default: the unit's folder on the share, \\\\mast-ns-control\\mast-share\\MAST\\<unit>",
+    )
 
     args = parser.parse_args(argv)
     if (args.ra is None) != (args.dec is None):

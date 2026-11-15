@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 #: One per host, wherever the app is started from and whichever session file it uses.
 LOCK_PATH = Path.home() / ".flux-orchestrator.lock"
 HISTORY_COLUMNS = ("Run", "Started UTC", "Ended as", "Folder")
+#: The max-flux run's products stay where they were, under the spectrograph host's folder.
+MAX_FLUX_HOST = "mast-ns-spec"
 STATUS_POLL_S = 2.0
 POLL_CHECK_S = 0.1
 RUN_FOLDERS: dict[Kind, str] = {
@@ -243,11 +245,17 @@ class HistoryRow:
     terminal: str
 
 
-def history(output_root: Path, now: datetime.datetime) -> list[HistoryRow]:
+def run_root(kind: Kind, share_root: Path, unit: str) -> Path:
+    """Where a run files its products: Param's runs in the unit's own folder, as the in-unit runs
+    did; the max-flux run under mast-ns-spec."""
+    return share_root / (MAX_FLUX_HOST if kind is Kind.MAX_FLUX else unit)
+
+
+def history(share_root: Path, unit: str, now: datetime.datetime) -> list[HistoryRow]:
     """This observing night's runs on the share, newest first, whoever started them."""
-    night = output_root / observing_night(now)
     rows: list[HistoryRow] = []
     for kind, leaf in RUN_FOLDERS.items():
+        night = run_root(kind, share_root, unit) / observing_night(now)
         for result in sorted((night / leaf).glob(f"*/{max_flux.RESULT_FILE}")):
             try:
                 record = json.loads(result.read_text(encoding="utf-8"))
@@ -636,7 +644,7 @@ class OrchestratorApp(App):
             FormField("unit", "unit host", s.unit, "mast03"),
             FormField("unit_port", "unit port", str(s.unit_port)),
             FormField("flux_meter", "flux-meter URL (e.g. http://mast-ns-spec:8003)", s.flux_meter, "not set"),
-            FormField("output_root", "output root", s.output_root),
+            FormField("output_root", "the share's MAST folder (runs go under <unit> or mast-ns-spec)", s.output_root),
             FormField(
                 "ra", "RA J2000, decimal hours (empty: none)", "" if s.ra_j2000_hours is None else str(s.ra_j2000_hours)
             ),
@@ -753,7 +761,7 @@ class OrchestratorApp(App):
                 self.session.params(kind),
                 self.services.unit(self.session, stop),
                 self.services.meter(self.session),
-                output_root=Path(self.session.output_root),
+                output_root=run_root(kind, Path(self.session.output_root), self.session.unit),
                 stop=stop,
                 on_event=lambda event: self.post_message(RunEventPosted(event)),
             )
@@ -828,7 +836,7 @@ class OrchestratorApp(App):
     @work(thread=True, group="abort")
     def _send_abort(self) -> None:
         try:
-            self.services.unit(self.session, None).abort()
+            self.services.unit(self.session, None).abort_and_park()
         except UnitApiError as ex:
             logger.error(f"hard stop: unit/abort failed: {ex}")
 
@@ -884,7 +892,7 @@ class OrchestratorApp(App):
 
     @work(thread=True, group="history", exclusive=True)
     def refresh_history(self) -> None:
-        rows = history(Path(self.session.output_root), datetime.datetime.now(datetime.UTC))
+        rows = history(Path(self.session.output_root), self.session.unit, datetime.datetime.now(datetime.UTC))
         self.call_from_thread(self._show_history, rows)
 
     def _show_history(self, rows: list[HistoryRow]) -> None:

@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 #: What `spiral_new_path` reports once the unit takes its steps as angles on the sky (MAST_unit#136).
 RA_STEP_COMMANDED = "ra_step_commanded_arcsec"
 #: Beside the flux-meter service's own frames, under the share's tree for this host.
-DEFAULT_OUTPUT_ROOT = Path(r"\\mast-ns-control\mast-share\MAST\mast-ns-spec")
+#: The share's MAST folder: each machine's products under its own name.
+SHARE_ROOT = Path(r"\\mast-ns-control\mast-share\MAST")
+DEFAULT_OUTPUT_ROOT = SHARE_ROOT / "mast-ns-spec"
 RUN_FOLDER = "flux-orchestrator"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 RESULT_FILE = "result.json"
@@ -196,6 +198,12 @@ def make_run_folder(output_root: Path, now: datetime.datetime, kind: str = RUN_F
     return folder
 
 
+def unit_root(unit: str) -> Path:
+    """A unit's own folder on the share, where Param's runs file their products, as the in-unit
+    runs did: `<share>/MAST/<unit>/<night>/FluxMetering/NNNN`."""
+    return SHARE_ROOT / unit
+
+
 def read_arriving[T](path: Path, read: Callable[[Path], T]) -> T:
     """Read a file the unit has queued for the share, waiting for it to arrive whole.
 
@@ -288,7 +296,12 @@ class Run:
             except KeyboardInterrupt:
                 self.record.terminal = Terminal.ABORTED
                 if self._stage is Stage.PREPARING:
-                    self.unit.abort()
+                    # An acquisition or a mirror move in flight; the mirror back to SKY if the abort
+                    # stopped it between the presets, where the unit refuses every run.
+                    try:
+                        self.unit.abort_and_park()
+                    except UnitApiError as ex:
+                        logger.error(f"aborting the unit: {ex}")
             except Exception as ex:
                 self.record.terminal = Terminal.FAILED
                 self.record.error = f"{type(ex).__name__}: {ex}"
